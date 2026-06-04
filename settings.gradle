@@ -67,3 +67,5 @@ String overrideableVersion(String settingName, String defaultVersion) {
 rootProject.name = 'hibernate-orm-benchmark-parent'
 include(':hibernate-orm-benchmark-basic')
 project(":hibernate-orm-benchmark-basic").projectDir = file('basic')
+include(':hibernate-orm-benchmark-reactive')
+project(":hibernate-orm-benchmark-reactive").projectDir = file('reactive')
