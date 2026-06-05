@@ -10,7 +10,11 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import org.hibernate.cfg.AvailableSettings;
 import org.hibernate.cfg.Configuration;
+import org.hibernate.engine.jdbc.spi.SqlExceptionHelper;
+import org.hibernate.engine.jdbc.spi.SqlStatementLogger;
 import org.hibernate.reactive.mutiny.Mutiny;
+import org.hibernate.reactive.pool.ReactiveConnectionPool;
+import org.hibernate.reactive.pool.impl.ExternalSqlClientPool;
 import org.hibernate.reactive.provider.ReactiveServiceRegistryBuilder;
 import org.hibernate.reactive.vertx.VertxInstance;
 
@@ -19,6 +23,9 @@ import io.vertx.core.DeploymentOptions;
 import io.vertx.core.Vertx;
 import io.vertx.core.VertxOptions;
 import io.vertx.core.json.JsonObject;
+import io.vertx.pgclient.PgConnectOptions;
+import io.vertx.sqlclient.Pool;
+import io.vertx.sqlclient.PoolOptions;
 
 import org.HdrHistogram.Histogram;
 import org.openjdk.jmh.annotations.AuxCounters;
@@ -56,6 +63,7 @@ public class ReactivePoolStealBenchmark {
 
 	private Mutiny.SessionFactory sessionFactory;
 	private Vertx vertx;
+	private Pool sharedPool;
 	private final AtomicInteger verticleIndex = new AtomicInteger();
 	private List<String> deploymentIds;
 
@@ -63,6 +71,16 @@ public class ReactivePoolStealBenchmark {
 	public void setup() {
 		var vertxOptions = new VertxOptions().setEventLoopPoolSize( eventLoopCount );
 		vertx = Vertx.vertx( vertxOptions );
+
+		var connectOptions = new PgConnectOptions()
+				.setHost( "localhost" )
+				.setPort( 5432 )
+				.setDatabase( "hibernate_orm_test" )
+				.setUser( "hibernate_orm_test" )
+				.setPassword( "hibernate_orm_test" )
+				.setCachePreparedStatements( false );
+		var poolOptions = new PoolOptions().setMaxSize( 2 );
+		sharedPool = Pool.pool( vertx, connectOptions, poolOptions );
 
 		var config = new Configuration();
 		config.addAnnotatedClass( World.class );
@@ -77,8 +95,15 @@ public class ReactivePoolStealBenchmark {
 		config.setProperty( "hibernate.generate_statistics", "false" );
 		config.setProperty( AvailableSettings.POOL_SIZE, "2" );
 
+		var externalPool = new ExternalSqlClientPool(
+				sharedPool,
+				new SqlStatementLogger( false, false ),
+				new SqlExceptionHelper( true )
+		);
+
 		var srb = new ReactiveServiceRegistryBuilder()
 				.addService( VertxInstance.class, (VertxInstance) () -> vertx )
+				.addService( ReactiveConnectionPool.class, externalPool )
 				.applySettings( config.getProperties() );
 
 		sessionFactory = config.buildSessionFactory( srb.build() )
@@ -125,6 +150,9 @@ public class ReactivePoolStealBenchmark {
 		if ( sessionFactory != null ) {
 			sessionFactory.close();
 		}
+		if ( sharedPool != null ) {
+			sharedPool.close().toCompletionStage().toCompletableFuture().join();
+		}
 		if ( vertx != null ) {
 			vertx.close().toCompletionStage().toCompletableFuture().join();
 		}
@@ -139,6 +167,7 @@ public class ReactivePoolStealBenchmark {
 	@State(Scope.Thread)
 	public static class ThreadContext {
 		String verticleAddress;
+		boolean hot;
 
 		@Setup(Level.Trial)
 		public void setup(ReactivePoolStealBenchmark bench) {
@@ -150,6 +179,7 @@ public class ReactivePoolStealBenchmark {
 				idx = bench.verticleIndex.getAndIncrement() % bench.eventLoopCount;
 			}
 			verticleAddress = WorkerVerticle.ADDRESS_PREFIX + idx;
+			hot = (idx == 0);
 		}
 	}
 
@@ -157,24 +187,32 @@ public class ReactivePoolStealBenchmark {
 	public static class LatencyState {
 		private static final long SLOW_THRESHOLD_NS = TimeUnit.MILLISECONDS.toNanos( 1 );
 
+		// Rate for the "cool" thread (verticle 1+)
 		@Param({"0"})
 		long targetInterArrivalNs;
+
+		// Rate for the "hot" thread (verticle 0). If 0, uses targetInterArrivalNs.
+		@Param({"0"})
+		long hotInterArrivalNs;
 
 		Histogram histogram;
 		long nextExpectedStartNs;
 		long iterationStartNs;
+		long effectiveInterArrivalNs;
 		CopyOnWriteArrayList<long[]> slowOps;
 
 		@Setup(Level.Iteration)
-		public void setup() {
+		public void setup(ThreadContext tc) {
 			histogram = new Histogram( TimeUnit.SECONDS.toNanos( 30 ), 3 );
 			nextExpectedStartNs = 0;
 			iterationStartNs = System.nanoTime();
+			effectiveInterArrivalNs = (tc.hot && hotInterArrivalNs > 0)
+					? hotInterArrivalNs : targetInterArrivalNs;
 			slowOps = new CopyOnWriteArrayList<>();
 		}
 
 		public long awaitExpectedStart() {
-			if ( targetInterArrivalNs <= 0 ) {
+			if ( effectiveInterArrivalNs <= 0 ) {
 				return System.nanoTime();
 			}
 			long now = System.nanoTime();
@@ -182,7 +220,7 @@ public class ReactivePoolStealBenchmark {
 				nextExpectedStartNs = now;
 			}
 			long expected = nextExpectedStartNs;
-			nextExpectedStartNs += targetInterArrivalNs;
+			nextExpectedStartNs += effectiveInterArrivalNs;
 			while ( System.nanoTime() < expected ) {
 				Thread.onSpinWait();
 			}
