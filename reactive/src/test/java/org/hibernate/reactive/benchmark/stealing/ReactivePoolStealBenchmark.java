@@ -3,10 +3,10 @@ package org.hibernate.reactive.benchmark.stealing;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import org.hibernate.cfg.AvailableSettings;
 import org.hibernate.cfg.Configuration;
@@ -15,9 +15,10 @@ import org.hibernate.reactive.provider.ReactiveServiceRegistryBuilder;
 import org.hibernate.reactive.vertx.VertxInstance;
 
 import io.smallrye.mutiny.Uni;
-import io.vertx.core.Future;
+import io.vertx.core.DeploymentOptions;
 import io.vertx.core.Vertx;
 import io.vertx.core.VertxOptions;
+import io.vertx.core.json.JsonObject;
 
 import org.HdrHistogram.Histogram;
 import org.openjdk.jmh.annotations.AuxCounters;
@@ -35,8 +36,6 @@ import org.openjdk.jmh.annotations.State;
 import org.openjdk.jmh.annotations.TearDown;
 import org.openjdk.jmh.annotations.Threads;
 import org.openjdk.jmh.annotations.Warmup;
-import org.openjdk.jmh.infra.Blackhole;
-
 
 @State(Scope.Benchmark)
 @Fork(2)
@@ -48,11 +47,17 @@ public class ReactivePoolStealBenchmark {
 	@Param({"2", "4", "8"})
 	int eventLoopCount;
 
-	@Param({"20", "5", "10"})
-	int queryCount;
+	@Param({"0", "5", "10"})
+	int sleepMs;
+
+	// -1 = round-robin (each thread gets its own verticle), 0+ = all threads target that verticle
+	@Param({"-1"})
+	int targetVerticle;
 
 	private Mutiny.SessionFactory sessionFactory;
 	private Vertx vertx;
+	private final AtomicInteger verticleIndex = new AtomicInteger();
+	private List<String> deploymentIds;
 
 	@Setup(Level.Trial)
 	public void setup() {
@@ -80,6 +85,7 @@ public class ReactivePoolStealBenchmark {
 				.unwrap( Mutiny.SessionFactory.class );
 
 		populateWorlds();
+		deployVerticles();
 	}
 
 	private void populateWorlds() {
@@ -89,9 +95,8 @@ public class ReactivePoolStealBenchmark {
 			sessionFactory.withTransaction( (session, tx) -> {
 				Uni<Void> chain = Uni.createFrom().voidItem();
 				for ( int i = start; i < start + batchSize; i++ ) {
-					final int idx = i;
 					final World world = new World();
-					world.setId( idx + 1 );
+					world.setId( i + 1 );
 					world.setRandomNumber( ThreadLocalRandom.current().nextInt( 10_000 ) );
 					chain = chain.chain( () -> session.persist( world ) );
 				}
@@ -100,8 +105,23 @@ public class ReactivePoolStealBenchmark {
 		}
 	}
 
+	private void deployVerticles() {
+		deploymentIds = new ArrayList<>( eventLoopCount );
+		for ( int i = 0; i < eventLoopCount; i++ ) {
+			var verticle = new WorkerVerticle( sessionFactory, i );
+			var id = vertx.deployVerticle( verticle, new DeploymentOptions() )
+					.toCompletionStage().toCompletableFuture().join();
+			deploymentIds.add( id );
+		}
+	}
+
 	@TearDown(Level.Trial)
 	public void teardown() {
+		if ( deploymentIds != null ) {
+			for ( var id : deploymentIds ) {
+				vertx.undeploy( id ).toCompletionStage().toCompletableFuture().join();
+			}
+		}
 		if ( sessionFactory != null ) {
 			sessionFactory.close();
 		}
@@ -114,6 +134,23 @@ public class ReactivePoolStealBenchmark {
 	@AuxCounters(AuxCounters.Type.OPERATIONS)
 	public static class Counters {
 		public long queries;
+	}
+
+	@State(Scope.Thread)
+	public static class ThreadContext {
+		String verticleAddress;
+
+		@Setup(Level.Trial)
+		public void setup(ReactivePoolStealBenchmark bench) {
+			int idx;
+			if ( bench.targetVerticle >= 0 ) {
+				idx = bench.targetVerticle;
+			}
+			else {
+				idx = bench.verticleIndex.getAndIncrement() % bench.eventLoopCount;
+			}
+			verticleAddress = WorkerVerticle.ADDRESS_PREFIX + idx;
+		}
 	}
 
 	@State(Scope.Thread)
@@ -189,66 +226,27 @@ public class ReactivePoolStealBenchmark {
 
 	// -- Benchmark methods --
 
-	private List<World> runOnEventLoop(int queries) {
-		var future = new CompletableFuture<List<World>>();
-		vertx.runOnContext( v ->
-				updateWorlds( sessionFactory, queries )
-						.onSuccess( future::complete )
-						.onFailure( future::completeExceptionally )
-		);
-		return future.join();
-	}
-
-	private Uni<List<World>> randomWorldsForWrite(Mutiny.Session session, int count) {
-		final List<World> worlds = new ArrayList<>( count );
-		//The rules require individual load: we can't use the Hibernate feature which allows load by multiple IDs
-		// as one single operation as Hibernate is too smart and will switch to use batched loads.
-		// But also, we can't use "Uni#join" as we did in the above method as managed entities shouldn't use pipelining -
-		// so we also have to avoid Mutiny optimising things by establishing an explicit chain:
-		Uni<Void> loopRoot = Uni.createFrom().voidItem();
-		for ( int i = 0; i < count; i++ ) {
-			loopRoot = loopRoot.call( () -> session
-					.find( World.class, ThreadLocalRandom.current().nextInt( 10_000 ) + 1 )
-					.invoke( worlds::add ) );
-		}
-		return loopRoot.map( v -> worlds );
-	}
-
-	private Future<List<World>> updateWorlds(Mutiny.SessionFactory emf, int queries) {
-		return toFuture( emf.withSession( session -> randomWorldsForWrite( session, queries )
-				.flatMap( worldsCollection -> {
-					worldsCollection.forEach( w -> {
-						w.setRandomNumber( ThreadLocalRandom.current().nextInt( 10_000 ) );
-					} );
-					return session
-							.setBatchSize( worldsCollection.size() )
-							.flush()
-							.map( v -> worldsCollection );
-				} )
-		) );
-	}
-
-	private static <U> Future<U> toFuture(Uni<U> uni) {
-		return Future.fromCompletionStage( uni.convert().toCompletionStage() );
+	private void sendToVerticle(String address, int sleepMs) {
+		var msg = new JsonObject().put( "sleepMs", sleepMs );
+		vertx.eventBus().<String>request( address, msg )
+				.toCompletionStage().toCompletableFuture().join();
 	}
 
 	@Benchmark
 	@BenchmarkMode(Mode.Throughput)
 	@OutputTimeUnit(TimeUnit.SECONDS)
-	public void throughput(Blackhole bh, Counters counters) {
-		var worlds = runOnEventLoop( queryCount );
-		bh.consume( worlds );
+	public void throughput(Counters counters, ThreadContext tc) {
+		sendToVerticle( tc.verticleAddress, sleepMs );
 		counters.queries++;
 	}
 
 	@Benchmark
 	@BenchmarkMode(Mode.Throughput)
 	@OutputTimeUnit(TimeUnit.SECONDS)
-	public void latency(Blackhole bh, Counters counters, LatencyState lat) {
+	public void latency(Counters counters, LatencyState lat, ThreadContext tc) {
 		long expectedStart = lat.awaitExpectedStart();
 
-		var worlds = runOnEventLoop( queryCount );
-		bh.consume( worlds );
+		sendToVerticle( tc.verticleAddress, sleepMs );
 		counters.queries++;
 
 		lat.recordLatency( expectedStart );
@@ -257,14 +255,14 @@ public class ReactivePoolStealBenchmark {
 	public static void main(String[] args) {
 		var bench = new ReactivePoolStealBenchmark();
 		bench.eventLoopCount = 2;
-		bench.queryCount = 20;
+		bench.sleepMs = 0;
 		bench.setup();
 
 		try {
 			for ( int i = 0; i < 10; i++ ) {
-				bench.runOnEventLoop( bench.queryCount );
+				bench.sendToVerticle( WorkerVerticle.ADDRESS_PREFIX + "0", bench.sleepMs );
 			}
-			System.out.println( "Completed 10 updateWorlds invocations" );
+			System.out.println( "Completed 10 invocations" );
 		}
 		finally {
 			bench.teardown();

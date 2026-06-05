@@ -1,7 +1,5 @@
 package org.hibernate.reactive.benchmark.stealing;
 
-import java.util.ArrayList;
-import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
@@ -28,8 +26,6 @@ import org.openjdk.jmh.annotations.Threads;
 import org.openjdk.jmh.annotations.Warmup;
 import org.openjdk.jmh.infra.Blackhole;
 
-import jakarta.persistence.EntityManager;
-
 @State(Scope.Benchmark)
 @Fork(2)
 @Threads(2)
@@ -37,8 +33,8 @@ import jakarta.persistence.EntityManager;
 @Measurement(iterations = 5, time = 10)
 public class BlockingPoolStealBenchmark {
 
-	@Param({"20", "5", "10"})
-	int queryCount;
+	@Param({"0", "5", "10"})
+	int sleepMs;
 
 	private SessionFactory sf;
 
@@ -145,7 +141,7 @@ public class BlockingPoolStealBenchmark {
 		public void report() {
 			if ( histogram.getTotalCount() > 0 ) {
 				System.out.println();
-				System.out.println( "=== Blocking ORM Worlds - HDR Histogram (microseconds) ===" );
+				System.out.println( "=== Blocking ORM - HDR Histogram (microseconds) ===" );
 				System.out.printf( "  Count:  %d%n", histogram.getTotalCount() );
 				System.out.printf( "  Mean:   %.1f%n", histogram.getMean() / 1000.0 );
 				System.out.printf( "  P50:    %.1f%n", histogram.getValueAtPercentile( 50.0 ) / 1000.0 );
@@ -168,29 +164,13 @@ public class BlockingPoolStealBenchmark {
 
 	// -- Benchmark methods --
 
-	private List<World> updateWorlds(EntityManager em, int queries) {
-		List<World> worlds = new ArrayList<>( queries );
-		for ( int i = 0; i < queries; i++ ) {
-			var world = em.find( World.class, ThreadLocalRandom.current().nextInt( 10_000 ) + 1 );
-			worlds.add( world );
-		}
-		worlds.forEach( w -> w.setRandomNumber( ThreadLocalRandom.current().nextInt( 10_000 ) ) );
-		em.unwrap( org.hibernate.Session.class ).setJdbcBatchSize( queries );
-		em.flush();
-		return worlds;
-	}
-
-	@Benchmark
-	@BenchmarkMode(Mode.Throughput)
-	@OutputTimeUnit(TimeUnit.SECONDS)
-	public void throughput(Blackhole bh, Counters counters) {
+	private void sleepThenFind(int sleepMs) {
 		var em = sf.createEntityManager();
 		try {
-			em.getTransaction().begin();
-			var worlds = updateWorlds( em, queryCount );
-			em.getTransaction().commit();
-			bh.consume( worlds );
-			counters.queries++;
+			em.createNativeQuery( "SELECT 1 FROM pg_sleep(" + (sleepMs / 1000.0) + ")" )
+					.getSingleResult();
+//			int id = ThreadLocalRandom.current().nextInt( 10_000 ) + 1;
+//			em.find( World.class, id );
 		}
 		finally {
 			em.close();
@@ -200,32 +180,31 @@ public class BlockingPoolStealBenchmark {
 	@Benchmark
 	@BenchmarkMode(Mode.Throughput)
 	@OutputTimeUnit(TimeUnit.SECONDS)
-	public void latency(Blackhole bh, Counters counters, LatencyState lat) {
+	public void throughput(Counters counters) {
+		sleepThenFind( sleepMs );
+		counters.queries++;
+	}
+
+	@Benchmark
+	@BenchmarkMode(Mode.Throughput)
+	@OutputTimeUnit(TimeUnit.SECONDS)
+	public void latency(Counters counters, LatencyState lat) {
 		long expectedStart = lat.awaitExpectedStart();
 
-		var em = sf.createEntityManager();
-		try {
-			em.getTransaction().begin();
-			var worlds = updateWorlds( em, queryCount );
-			em.getTransaction().commit();
-			bh.consume( worlds );
-			counters.queries++;
-		}
-		finally {
-			em.close();
-		}
+		sleepThenFind( sleepMs );
+		counters.queries++;
 
 		lat.recordLatency( expectedStart );
 	}
 
 	public static void main(String[] args) {
 		var bench = new BlockingPoolStealBenchmark();
-		bench.queryCount = 20;
+		bench.sleepMs = 0;
 		bench.setup();
 		var counters = new Counters();
 		try {
 			for ( int i = 0; i < 10; i++ ) {
-				bench.throughput( null, counters );
+				bench.throughput( counters );
 			}
 			System.out.println( "Queries executed: " + counters.queries );
 		}
