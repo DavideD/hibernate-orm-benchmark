@@ -35,7 +35,7 @@ dependencies {
         testImplementation 'org.hibernate.reactive:hibernate-reactive-core:3.4.0.Final'
         testImplementation 'io.vertx:vertx-pg-client:4.5.27'
     }
-    testImplementation 'io.agroal:agroal-pool:2.5.1'
+    testImplementation 'io.agroal:agroal-pool:3.0.1'
     testRuntimeOnly 'com.ongres.scram:scram-client:3.2'
 
     // JDBC PostgreSQL driver (for blocking ORM side)

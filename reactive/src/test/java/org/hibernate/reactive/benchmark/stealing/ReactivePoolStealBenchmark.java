@@ -18,7 +18,6 @@ import org.hibernate.reactive.pool.impl.ExternalSqlClientPool;
 import org.hibernate.reactive.provider.ReactiveServiceRegistryBuilder;
 import org.hibernate.reactive.vertx.VertxInstance;
 
-import io.smallrye.mutiny.Uni;
 import io.vertx.core.DeploymentOptions;
 import io.vertx.core.Vertx;
 import io.vertx.core.VertxOptions;
@@ -117,16 +116,16 @@ public class ReactivePoolStealBenchmark {
 		final int batchSize = 500;
 		for ( int batch = 0; batch < 10_000 / batchSize; batch++ ) {
 			final int start = batch * batchSize;
-			sessionFactory.withTransaction( (session, tx) -> {
-				Uni<Void> chain = Uni.createFrom().voidItem();
-				for ( int i = start; i < start + batchSize; i++ ) {
-					final World world = new World();
-					world.setId( i + 1 );
-					world.setRandomNumber( ThreadLocalRandom.current().nextInt( 10_000 ) );
-					chain = chain.chain( () -> session.persist( world ) );
-				}
-				return chain.chain( session::flush );
-			} ).await().atMost( Duration.ofMinutes( 2 ) );
+			// A Uni chain 500 levels deep overflows the event loop stack: use persistAll
+			final Object[] worlds = new Object[batchSize];
+			for ( int i = 0; i < batchSize; i++ ) {
+				final World world = new World();
+				world.setId( start + i + 1 );
+				world.setRandomNumber( ThreadLocalRandom.current().nextInt( 10_000 ) );
+				worlds[i] = world;
+			}
+			sessionFactory.withTransaction( session -> session.persistAll( worlds ) )
+					.await().atMost( Duration.ofMinutes( 2 ) );
 		}
 	}
 
