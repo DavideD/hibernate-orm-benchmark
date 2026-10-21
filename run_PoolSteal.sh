@@ -6,6 +6,10 @@
 #   Start a perf-tuned PostgreSQL container: ./start_pg.sh
 #
 # This script runs throughput and optional latency benchmarks.
+#
+# The throughput benchmarks use more threads than connections (THREADS, default 16, pool size 2),
+# so the reactive pool is full and connections are stolen from other event loops.
+# With THREADS=2, each event loop keeps its own connection and nothing is stolen.
 # For ad-hoc runs with custom parameters, build the JMH jar once and
 # invoke java -jar directly.
 #
@@ -66,6 +70,7 @@ fi
 
 VERSION=${1:-default}
 TARGET_INTERVAL_NS=$2
+THREADS=${THREADS:-16}
 
 # Detect async-profiler library
 AP_PROF_ARGS=""
@@ -94,7 +99,7 @@ echo "=========================================="
 echo "  Throughput (Blocking ORM)"
 echo "=========================================="
 java -jar $JAR BlockingPoolStealBenchmark.throughput \
- -t 2 -f 1 -wi 2 -w 3s -i 3 -r 5s \
+ -t ${THREADS} -f 1 -wi 2 -w 3s -i 3 -r 5s \
  -p targetInterArrivalNs=0 -p sleepMs=0,5,10 \
  -prof gc \
  ${AP_PROF_ARGS}
@@ -104,7 +109,7 @@ echo "=========================================="
 echo "  Throughput (Reactive)"
 echo "=========================================="
 java -jar $JAR ReactivePoolStealBenchmark.throughput \
- -t 2 -f 1 -wi 2 -w 3s -i 3 -r 5s \
+ -t ${THREADS} -f 1 -wi 2 -w 3s -i 3 -r 5s \
  -p targetInterArrivalNs=0 -p eventLoopCount=2 -p sleepMs=0,5,10 \
  -prof gc \
  ${AP_PROF_ARGS}
