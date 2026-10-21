@@ -77,12 +77,28 @@ The options on the table:
 - **One pool per event loop**
   (tsegismont's `PerEventLoopPool` in [DavideD/FrameworkBenchmarks#1](https://github.com/DavideD/FrameworkBenchmarks/pull/1)).
   There's never a steal, but the connections are split up: a busy loop can't borrow idle connections from quiet ones.
+  The benchmark can run with it, see `poolType` below.
 
 ## 6. What this means for the benchmark
 
 `ReactivePoolStealBenchmark` counts stolen connections (`StealCounter`) and prints, after each iteration,
 the ratio and how many connections and requests each event loop has.
 Run it with `./run_PoolStealCounter.sh` (see `--help` for the options, `STACK=vertx5` builds with Vert.x 5).
+
+The `poolType` parameter selects the pool:
+
+- `shared` (default): one Vert.x pool for all the event loops, like Quarkus.
+  Add `-p poolEventLoopSize=N` to spread its connections across the loops like Quarkus does.
+- `perEventLoop`: one pool per event loop, each with `poolSize / eventLoopCount` connections (`PerEventLoopPool`).
+  A port of tsegismont's pool that works with Vert.x 4 and 5. It ignores `poolEventLoopSize`,
+  and `poolSize` must be at least `eventLoopCount`.
+
+For example, to compare the three setups with all the requests on one event loop:
+
+```
+./run_PoolStealCounter.sh -p poolType=shared -p poolEventLoopSize=0,4
+./run_PoolStealCounter.sh -p poolType=perEventLoop -p poolEventLoopSize=0
+```
 
 The setup (dialect detection, schema creation, test data) runs on the JMH thread,
 and Vert.x gives that thread a context on an event loop that isn't the verticles' one.
@@ -102,6 +118,9 @@ Results from short runs (one fork, 5 s measurement, `sleepMs=1` unless noted):
 | Same, with `poolEventLoopSize=4` | 74.9% | 3,703 |
 | `sleepMs=0`, requests spread evenly, pool 8, 4 loops, 8 threads | 0% | ~63k |
 | Same, with `poolEventLoopSize=4` | 0% | ~63k |
+| 16 threads, pool 2, 2 loops, `poolType=perEventLoop` | 0% | 918 |
+| All requests on loop 0, pool 8, 4 loops, 8 threads, `poolType=perEventLoop` | 0% | 916 |
+| `sleepMs=0`, requests spread evenly, pool 8, 4 loops, 8 threads, `poolType=perEventLoop` | 0% | ~65k |
 
 Vert.x 5 (`STACK=vertx5`) gives the same ratios.
 
@@ -111,6 +130,9 @@ What the numbers show:
 - A full pool causes stealing: the wait queue hands connections out in arrival order, whatever the loop.
 - When one loop is busier than the others, the Quarkus setting alone causes stealing:
   (N-1)/N of the connections are on other loops, while the plain pool creates all of them on the busy loop.
+- One pool per event loop never steals, and costs nothing when the load is even.
+  When one loop does all the work, it only has its share of the connections (2 out of 8 here)
+  and throughput drops to a quarter of the shared pool's.
 - Throughput hardly changes between 0% and 75% stolen, because the database round trip and the pool size set the limit.
   The cost of stealing is CPU on the event loops and extra latency.
   It shows up only when the database isn't the bottleneck and the event loops are busy.
