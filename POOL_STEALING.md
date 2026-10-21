@@ -43,7 +43,12 @@ continue ◀── hand result back ─
 
 Each crossing costs something:
 
-- **Thread handoffs:** a task is queued for the other loop, which often has to be woken up with a system call.
+- **Thread handoffs:** a task is queued for the other loop. If that loop is asleep (waiting for I/O),
+  it has to be woken up: a system call and a context switch. A steal can cost two of them for every query:
+  A wakes up B to send the query, and B wakes up A to hand back the result.
+  This is cheapest when both loops are busy, because they're already awake,
+  and most expensive when they're lightly loaded and go to sleep between events,
+  like a car that keeps stopping and starting in traffic.
 - **Cache misses:** B decodes the rows on its CPU core, then A reads them from another core.
 - **Uneven load:** B does work for requests it isn't handling. If B is busy, A's query waits behind B's own work,
   which adds latency.
@@ -134,12 +139,76 @@ What the numbers show:
   When one loop does all the work, it only has its share of the connections (2 out of 8 here)
   and throughput drops to a quarter of the shared pool's.
 - Throughput hardly changes between 0% and 75% stolen, because the database round trip and the pool size set the limit.
-  The cost of stealing is CPU on the event loops and extra latency.
-  It shows up only when the database isn't the bottleneck and the event loops are busy.
+  The cost of stealing is CPU: wake-ups and context switches on both event loops, for every query of the session.
+  It's highest when the event loops are lightly loaded and go to sleep between events,
+  and it doesn't show up in throughput until the CPU runs out.
+  To see it, measure the CPU per request at a fixed request rate, not the maximum throughput (see section 7).
 
-Next steps to make the cost visible:
+This benchmark can't show the cost of stealing: it measures the maximum throughput,
+and every operation already goes from a JMH thread to an event loop and back, the same kind of handoff a steal adds.
+Section 7 measures it with a different benchmark.
 
-- Generate the load inside the event loops (each verticle keeping N requests in flight)
-  instead of blocking JMH threads, which add an event bus round trip to every operation.
-- Run several queries per session, like the TechEmpower `/queries?queries=20` endpoint.
-- Measure latency and CPU per operation (`-prof perfnorm`) with `sleepMs=0`.
+## 7. Measuring the CPU cost of stealing
+
+The `reactive-openloop` module (`OpenLoopStealBenchmark`) runs the requests at a fixed rate,
+well below the maximum throughput, so that the event loops go to sleep between events.
+Each event loop runs a `LoadVerticle` that starts the requests itself, at random intervals (Poisson arrivals),
+so no other thread is involved. Each request opens a session and runs 5 `find`s.
+
+For the event loop threads only, it measures:
+
+- **CPU per request** (`ThreadMXBean`).
+- **Sleeps per request:** the voluntary context switches, from `/proc/thread-self/status`.
+  Each time an event loop goes to sleep, something has to wake it up again. Linux only.
+- **Latency,** from the time each request was scheduled to start, so a request that starts late counts as slow.
+
+It compares the shared pool with `poolEventLoopSize` equal to the number of event loops (like Quarkus),
+which steals, with `PerEventLoopPool`, which can't steal, at the same request rate.
+Run it with `./run_OpenLoopSteal.sh` (see `--help`):
+
+```
+./run_OpenLoopSteal.sh poolSize=4
+RATES="2000 4000" REPEAT=3 ./run_OpenLoopSteal.sh poolSize=8 weights=4,2,1,1
+```
+
+Results: 4 event loops, 10 s warm-up, 20 s measurement, 3 runs for each line (averages, the runs were within about 3% of each other).
+Event loop CPU is per request; "busiest loop" is the CPU of the busiest event loop (100% = one core).
+
+**1 connection per event loop (`poolSize=4`), same load on every event loop:**
+
+| Requests/s | Pool | Stolen | CPU per request | Sleeps per request | Busiest loop | p50 | p99 |
+|---|---|---|---|---|---|---|---|
+| 1000 | shared | 15% | 137 µs | 12.5 | 4% | 0.99 ms | 1.9 ms |
+| 1000 | per event loop | 0% | 130 µs | 11.2 | 3% | 1.03 ms | 2.0 ms |
+| 2000 | shared | 34% | 147 µs | 13.6 | 8% | 1.08 ms | 2.3 ms |
+| 2000 | per event loop | 0% | 125 µs | 10.9 | 6% | 1.13 ms | 2.2 ms |
+| 4000 | shared | 63% | 165 µs | 15.0 | 17% | 1.34 ms | 2.6–15.9 ms |
+| 4000 | per event loop | 0% | 125 µs | 10.5 | 13% | 1.36 ms | 2.6–2.8 ms |
+
+**2 connections per event loop (`poolSize=8`), loads 4:2:1:1 (`weights=4,2,1,1`):**
+
+| Requests/s | Pool | Stolen | CPU per request | Sleeps per request | Busiest loop | p50 | p99 |
+|---|---|---|---|---|---|---|---|
+| 1000 | shared | 3% | 128 µs | 10.3 | 6% | 0.99 ms | 1.9 ms |
+| 1000 | per event loop | 0% | 125 µs | 10.1 | 6% | 1.00 ms | 1.9 ms |
+| 2000 | shared | 11% | 125 µs | 9.8 | 10% | 1.04 ms | 2.0 ms |
+| 2000 | per event loop | 0% | 118 µs | 9.1 | 11% | 1.06 ms | 2.0 ms |
+| 4000 | shared | 33% | 143 µs | 9.2 | 19% | 1.22 ms | 2.3–2.8 ms |
+| 4000 | per event loop | 0% | 122 µs | 7.8 | 23% | 1.26 ms | 2.4–2.6 ms |
+
+What the numbers show:
+
+- With stealing, each request uses more event loop CPU, in proportion to how many are stolen:
+  about 50–65 µs more for each stolen session of 5 queries, so about 10–13 µs per query.
+  At 4000 requests/s with 63% stolen, the event loops use 32% more CPU (0.66 cores instead of 0.50).
+- The event loops also sleep more often, and every sleep needs a wake-up: up to 4.5 more per request.
+- The event loops are far from busy (at most 23% of a core), and the latency is about the same without stealing:
+  the median is at most 0.05 ms higher, the p99 is the same (one run with stealing had a 15.9 ms p99).
+- The cost per stolen request was about the same at every rate. All these runs keep the event loops lightly loaded,
+  so they don't show whether stealing gets cheaper when the event loops are busy.
+- Without stealing, the busiest event loop does all its own work: with uneven load it uses more CPU (23% instead of 19%),
+  and it only has its share of the connections. With more uneven load than this, or fewer connections,
+  its requests would wait for a connection and the latency would go up (see section 6).
+- With enough connections that nothing is stolen (`poolSize=16`, same load everywhere, 2000 requests/s, 0.1% stolen),
+  both pools used about the same CPU per request (115 µs shared, 118 µs per event loop, one 10 s run).
+  The difference comes from stealing, not from the pool implementation.
