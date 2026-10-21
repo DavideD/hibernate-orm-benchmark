@@ -3,7 +3,6 @@ package org.hibernate.reactive.benchmark.stealing;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -27,7 +26,6 @@ import io.vertx.sqlclient.Pool;
 import io.vertx.sqlclient.PoolOptions;
 
 import org.HdrHistogram.Histogram;
-import org.openjdk.jmh.annotations.AuxCounters;
 import org.openjdk.jmh.annotations.Benchmark;
 import org.openjdk.jmh.annotations.BenchmarkMode;
 import org.openjdk.jmh.annotations.Fork;
@@ -67,11 +65,13 @@ public class ReactivePoolStealBenchmark {
 	@Param({"0"})
 	int poolEventLoopSize;
 
-	private final StealCounter stealCounter = new StealCounter();
+	private StealCounter stealCounter;
 
 	private Mutiny.SessionFactory sessionFactory;
 	private Vertx vertx;
 	private Pool sharedPool;
+	private PgConnectOptions connectOptions;
+	private PoolOptions poolOptions;
 	private final AtomicInteger verticleIndex = new AtomicInteger();
 	private List<String> deploymentIds;
 
@@ -80,14 +80,15 @@ public class ReactivePoolStealBenchmark {
 		var vertxOptions = new VertxOptions().setEventLoopPoolSize( eventLoopCount );
 		vertx = Vertx.vertx( vertxOptions );
 
-		var connectOptions = new PgConnectOptions()
+		connectOptions = new PgConnectOptions()
 				.setHost( "localhost" )
 				.setPort( 5432 )
 				.setDatabase( "hibernate_orm_test" )
 				.setUser( "hibernate_orm_test" )
 				.setPassword( "hibernate_orm_test" )
 				.setCachePreparedStatements( false );
-		var poolOptions = new PoolOptions().setMaxSize( poolSize ).setEventLoopSize( poolEventLoopSize );
+		poolOptions = new PoolOptions().setMaxSize( poolSize ).setEventLoopSize( poolEventLoopSize );
+		stealCounter = new StealCounter( vertx );
 		sharedPool = stealCounter.wrap( Pool.pool( vertx, connectOptions, poolOptions ) );
 
 		var config = new Configuration();
@@ -101,7 +102,6 @@ public class ReactivePoolStealBenchmark {
 		config.setProperty( AvailableSettings.HBM2DDL_AUTO, "create" );
 		config.setProperty( AvailableSettings.STATEMENT_BATCH_SIZE, "0" );
 		config.setProperty( "hibernate.generate_statistics", "false" );
-		config.setProperty( AvailableSettings.POOL_SIZE, "2" );
 
 		var externalPool = new ExternalSqlClientPool(
 				sharedPool,
@@ -118,7 +118,18 @@ public class ReactivePoolStealBenchmark {
 				.unwrap( Mutiny.SessionFactory.class );
 
 		populateWorlds();
+		discardSetupConnections();
 		deployVerticles();
+	}
+
+	/**
+	 * The connections opened so far (dialect detection, schema creation, {@link #populateWorlds()})
+	 * belong to the event loops of the contexts Vert.x created for the JMH thread, not to the verticles.
+	 * The pool keeps them open, so they would add steals that the benchmark doesn't intend to measure.
+	 */
+	private void discardSetupConnections() {
+		stealCounter.replace( Pool.pool( vertx, connectOptions, poolOptions ) )
+				.close().toCompletionStage().toCompletableFuture().join();
 	}
 
 	private void populateWorlds() {
@@ -177,12 +188,6 @@ public class ReactivePoolStealBenchmark {
 	}
 
 	@State(Scope.Thread)
-	@AuxCounters(AuxCounters.Type.OPERATIONS)
-	public static class Counters {
-		public long queries;
-	}
-
-	@State(Scope.Thread)
 	public static class ThreadContext {
 		String verticleAddress;
 		boolean hot;
@@ -204,6 +209,8 @@ public class ReactivePoolStealBenchmark {
 	@State(Scope.Thread)
 	public static class LatencyState {
 		private static final long SLOW_THRESHOLD_NS = TimeUnit.MILLISECONDS.toNanos( 1 );
+		// With sleepMs >= 1 every operation is slow: only keep the first ones
+		private static final int MAX_SLOW_OPS = 100;
 
 		// Rate for the "cool" thread (verticle 1+)
 		@Param({"0"})
@@ -217,7 +224,8 @@ public class ReactivePoolStealBenchmark {
 		long nextExpectedStartNs;
 		long iterationStartNs;
 		long effectiveInterArrivalNs;
-		CopyOnWriteArrayList<long[]> slowOps;
+		List<long[]> slowOps;
+		long slowOpsCount;
 
 		@Setup(Level.Iteration)
 		public void setup(ThreadContext tc) {
@@ -226,7 +234,8 @@ public class ReactivePoolStealBenchmark {
 			iterationStartNs = System.nanoTime();
 			effectiveInterArrivalNs = (tc.hot && hotInterArrivalNs > 0)
 					? hotInterArrivalNs : targetInterArrivalNs;
-			slowOps = new CopyOnWriteArrayList<>();
+			slowOps = new ArrayList<>( MAX_SLOW_OPS );
+			slowOpsCount = 0;
 		}
 
 		public long awaitExpectedStart() {
@@ -250,8 +259,10 @@ public class ReactivePoolStealBenchmark {
 			long elapsed = endNs - expectedStartNs;
 			histogram.recordValue( Math.max( elapsed, 0 ) );
 			if ( elapsed > SLOW_THRESHOLD_NS ) {
-				long offsetNs = endNs - iterationStartNs;
-				slowOps.add( new long[]{ offsetNs, elapsed } );
+				if ( slowOpsCount++ < MAX_SLOW_OPS ) {
+					long offsetNs = endNs - iterationStartNs;
+					slowOps.add( new long[]{ offsetNs, elapsed } );
+				}
 			}
 		}
 
@@ -268,8 +279,8 @@ public class ReactivePoolStealBenchmark {
 				System.out.printf( "  P99.9:  %.1f%n", histogram.getValueAtPercentile( 99.9 ) / 1000.0 );
 				System.out.printf( "  Max:    %.1f%n", histogram.getMaxValue() / 1000.0 );
 				if ( !slowOps.isEmpty() ) {
-					System.out.printf( "  Slow (>1ms): %d ops%n", slowOps.size() );
-					System.out.println( "  Slow ops (offset_ms, latency_ms):" );
+					System.out.printf( "  Slow (>1ms): %d ops%n", slowOpsCount );
+					System.out.printf( "  First %d slow ops (offset_ms, latency_ms):%n", slowOps.size() );
 					for ( var op : slowOps ) {
 						System.out.printf( "    t=%.1f  lat=%.1f%n", op[0] / 1_000_000.0, op[1] / 1_000_000.0 );
 					}
@@ -291,19 +302,17 @@ public class ReactivePoolStealBenchmark {
 	@Benchmark
 	@BenchmarkMode(Mode.Throughput)
 	@OutputTimeUnit(TimeUnit.SECONDS)
-	public void throughput(Counters counters, ThreadContext tc) {
+	public void throughput(ThreadContext tc) {
 		sendToVerticle( tc.verticleAddress, sleepMs );
-		counters.queries++;
 	}
 
 	@Benchmark
 	@BenchmarkMode(Mode.Throughput)
 	@OutputTimeUnit(TimeUnit.SECONDS)
-	public void latency(Counters counters, LatencyState lat, ThreadContext tc) {
+	public void latency(LatencyState lat, ThreadContext tc) {
 		long expectedStart = lat.awaitExpectedStart();
 
 		sendToVerticle( tc.verticleAddress, sleepMs );
-		counters.queries++;
 
 		lat.recordLatency( expectedStart );
 	}
