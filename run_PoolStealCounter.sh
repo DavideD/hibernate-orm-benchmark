@@ -9,15 +9,14 @@
 # Environment variables:
 #   JAVA_HOME     JDK used for Gradle and JMH (default: a JDK 21 in /usr/lib/jvm, Gradle 8.4 can't run on 25)
 #   PODMAN        Container command (default: podman, or "sudo podman" if rootless podman doesn't work)
+#   STACK         Versions to build with: vertx5 or 6.6 (default: ORM 7.4 + HR 3.4 + Vert.x 4.5)
 #   SKIP_BUILD    Set to true to reuse the jar from a previous build
 #   STOP_DB       Set to true to stop the database when the benchmark ends
 
 set -e
 
-CONTAINER_NAME="pg-steal"
-PG_USER="hibernate_orm_test"
-PG_PASS="hibernate_orm_test"
-PG_DB="hibernate_orm_test"
+# Same container as start_pg.sh
+CONTAINER_NAME="postgres-bench"
 JAR=reactive/target/libs/hibernate-orm-benchmark-reactive-1.0-SNAPSHOT-jmh.jar
 
 # Default scenario: all requests on event loop 0, plain Vert.x pool vs Quarkus-like pool
@@ -33,7 +32,7 @@ DEFAULT_ARGS=(
 )
 
 if [[ "$1" == "-h" || "$1" == "--help" ]]; then
-	sed -n '3,14p' "$0" | sed 's/^# \{0,1\}//'
+	sed -n '3,15p' "$0" | sed 's/^# \{0,1\}//'
 	exit 0
 fi
 
@@ -67,36 +66,18 @@ fi
 if [ "$($PODMAN inspect -f '{{.State.Running}}' "$CONTAINER_NAME" 2>/dev/null)" == "true" ]; then
 	echo "Reusing running container $CONTAINER_NAME"
 else
-	echo "Starting container $CONTAINER_NAME"
-	$PODMAN run --rm -d \
-		--name "$CONTAINER_NAME" \
-		-p 5432:5432 \
-		-e POSTGRES_USER="$PG_USER" \
-		-e POSTGRES_PASSWORD="$PG_PASS" \
-		-e POSTGRES_DB="$PG_DB" \
-		docker.io/library/postgres:18 \
-		-c fsync=off \
-		-c synchronous_commit=off \
-		-c full_page_writes=off \
-		-c autovacuum=off \
-		-c max_connections=200 > /dev/null
+	PODMAN="$PODMAN" ./start_pg.sh
 fi
 
 if [ "$STOP_DB" == "true" ]; then
 	trap '$PODMAN stop "$CONTAINER_NAME" > /dev/null && echo "Stopped $CONTAINER_NAME"' EXIT
 fi
 
-echo "Waiting for PostgreSQL to be ready..."
-# pg_isready can answer before the init scripts are done, so also wait for a real query
-until $PODMAN exec "$CONTAINER_NAME" psql -U "$PG_USER" -d "$PG_DB" -h localhost -c 'select 1' > /dev/null 2>&1; do
-	sleep 0.5
-done
-
 # --- Build ---
 if [ "$SKIP_BUILD" == "true" ] && [ -f "$JAR" ]; then
 	echo "Skipping build, using $JAR"
 else
-	./gradlew :hibernate-orm-benchmark-reactive:jmhJar
+	./gradlew :hibernate-orm-benchmark-reactive:jmhJar ${STACK:+-Pstack=$STACK}
 fi
 
 # --- Benchmark ---
