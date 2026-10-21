@@ -65,6 +65,11 @@ public class ReactivePoolStealBenchmark {
 	@Param({"0"})
 	int poolEventLoopSize;
 
+	// shared = one pool for all the event loops (like Quarkus),
+	// perEventLoop = one pool per event loop with poolSize / eventLoopCount connections each (ignores poolEventLoopSize)
+	@Param({"shared"})
+	String poolType;
+
 	private StealCounter stealCounter;
 
 	private Mutiny.SessionFactory sessionFactory;
@@ -89,7 +94,7 @@ public class ReactivePoolStealBenchmark {
 				.setCachePreparedStatements( false );
 		poolOptions = new PoolOptions().setMaxSize( poolSize ).setEventLoopSize( poolEventLoopSize );
 		stealCounter = new StealCounter( vertx );
-		sharedPool = stealCounter.wrap( Pool.pool( vertx, connectOptions, poolOptions ) );
+		sharedPool = stealCounter.wrap( createPool() );
 
 		var config = new Configuration();
 		config.addAnnotatedClass( World.class );
@@ -128,8 +133,16 @@ public class ReactivePoolStealBenchmark {
 	 * The pool keeps them open, so they would add steals that the benchmark doesn't intend to measure.
 	 */
 	private void discardSetupConnections() {
-		stealCounter.replace( Pool.pool( vertx, connectOptions, poolOptions ) )
+		stealCounter.replace( createPool() )
 				.close().toCompletionStage().toCompletableFuture().join();
+	}
+
+	private Pool createPool() {
+		return switch ( poolType ) {
+			case "shared" -> Pool.pool( vertx, connectOptions, poolOptions );
+			case "perEventLoop" -> PerEventLoopPool.create( vertx, connectOptions, poolOptions );
+			default -> throw new IllegalArgumentException( "Unknown pool type: " + poolType );
+		};
 	}
 
 	private void populateWorlds() {
