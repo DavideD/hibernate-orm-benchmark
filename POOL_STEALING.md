@@ -212,3 +212,73 @@ What the numbers show:
 - With enough connections that nothing is stolen (`poolSize=16`, same load everywhere, 2000 requests/s, 0.1% stolen),
   both pools used about the same CPU per request (115 µs shared, 118 µs per event loop, one 10 s run).
   The difference comes from stealing, not from the pool implementation.
+
+## 8. Steal policies
+
+`StealPolicyPool` is a prototype of the options proposed to control stealing.
+With no free connection on the request's event loop:
+
+| Policy (`poolType`) | Free connection on another event loop | No free connection anywhere |
+|---|---|---|
+| `always` | take it | wait for the first connection released by any event loop (what the Vert.x pool does) |
+| `alwaysActive` | take it (it's already open) | wait for a connection of the same event loop |
+| `preferLocalWait` | wait up to `localWaitMs` (default 1 ms) for a connection of the same event loop, then like `always` | same |
+| `never` | wait for a connection of the same event loop | same |
+
+The Vert.x pool can't be configured like this: a released connection always goes to the request that has waited
+the longest. So the prototype is made of one Vert.x pool per event loop, all their connections opened at the start,
+and decides itself which pool each request gets its connection from (see the class Javadoc).
+A connection from another event loop is still acquired on the request's event loop, so the results go back to it,
+like with the Vert.x pool. To check it, `always` behaves like the Vert.x pool (`shared`):
+same steal ratio, same CPU per request within the noise.
+
+```
+POOL_TYPES="shared always alwaysActive preferLocalWait never" ./run_OpenLoopSteal.sh poolSize=4
+```
+
+Results with the setups of section 7, 2 runs for each line (ranges show both runs).
+These runs were noisier than the ones in section 7: two runs of the same line differ by up to 20%.
+
+**1 connection per event loop (`poolSize=4`), same load on every event loop:**
+
+| Requests/s | Pool | Stolen | CPU per request | Sleeps per request | p50 | p99 |
+|---|---|---|---|---|---|---|
+| 2000 | `shared` | 34–39% | 145–175 µs | 13.7 | 1.07–1.20 ms | 2.2–5.7 ms |
+| 2000 | `always` | 35% | 154–159 µs | 13.7 | 1.10–1.12 ms | 2.5–3.3 ms |
+| 2000 | `alwaysActive` | 30–31% | 158–178 µs | 13.3 | 1.13–1.23 ms | 3.1–4.7 ms |
+| 2000 | `preferLocalWait` | 1% | 133–135 µs | 11.0 | 1.15–1.17 ms | 2.4–3.2 ms |
+| 2000 | `never` | 0% | 133–135 µs | 10.9 | 1.15–1.17 ms | 2.4–3.5 ms |
+| 4000 | `shared` | 63–65% | 159–172 µs | 15.0 | 1.32–1.40 ms | 2.8–6.9 ms |
+| 4000 | `always` | 64–65% | 170–183 µs | 15.3 | 1.36–1.45 ms | 5.9–12.6 ms |
+| 4000 | `alwaysActive` | 37% | 150–155 µs | 13.3 | 1.29–1.33 ms | 2.5–3.9 ms |
+| 4000 | `preferLocalWait` | 3–4% | 127–130 µs | 10.8 | 1.34–1.35 ms | 2.4–2.5 ms |
+| 4000 | `never` | 0% | 125–127 µs | 10.5 | 1.35 ms | 2.6 ms |
+
+**2 connections per event loop (`poolSize=8`), loads 4:2:1:1:**
+
+| Requests/s | Pool | Stolen | CPU per request | Sleeps per request | Busiest loop | p50 | p99 |
+|---|---|---|---|---|---|---|---|
+| 4000 | `shared` | 32–35% | 138–150 µs | 9.2 | 18–20% | 1.20–1.27 ms | 2.3–4.2 ms |
+| 4000 | `always` | 32% | 137–138 µs | 9.0 | 18–19% | 1.19 ms | 2.2–2.3 ms |
+| 4000 | `alwaysActive` | 29% | 136–137 µs | 8.8 | 18–19% | 1.18–1.19 ms | 2.2 ms |
+| 4000 | `preferLocalWait` | 1% | 120–122 µs | 7.9 | 23% | 1.24–1.25 ms | 2.3–2.4 ms |
+| 4000 | `never` | 0% | 119–130 µs | 7.9 | 23–25% | 1.23–1.29 ms | 2.3–3.3 ms |
+
+At 1000 requests/s all the policies were within the noise of each other (15% stolen at most).
+
+What the numbers show:
+
+- `preferLocalWait` with 1 ms gets almost all of the benefit of `never`: a connection of the same event loop
+  nearly always gets free within 1 ms, so it steals 1–4% of the time, and uses the same CPU as `never`
+  (12–27% less than `always` at 2000 and 4000 requests/s). Unlike `never`, it still steals when a request would wait longer,
+  so an event loop can't be stuck waiting while the others have free connections.
+- `alwaysActive` only differs from `always` when requests have to wait, which here happens with a full pool:
+  at 4000 requests/s with 1 connection per event loop it steals 37% instead of 64%, and uses about 15% less CPU.
+  With free connections around, it steals as much as `always`.
+- The latency without stealing was the same or better: the median is up to 0.05 ms higher at 2000 requests/s,
+  the same at 4000. The p99 of `always` and `shared` had the worst outliers.
+- Without stealing, the busiest event loop does more of its own work (23% of a core instead of 18–19%).
+  With more uneven load or fewer connections, its requests would wait for a connection: the timeout of
+  `preferLocalWait` is what limits that wait.
+- `never` is about 5 µs per request slower than `PerEventLoopPool` (section 7), likely the cost of wrapping
+  the connections, which all the `StealPolicyPool` policies pay.
