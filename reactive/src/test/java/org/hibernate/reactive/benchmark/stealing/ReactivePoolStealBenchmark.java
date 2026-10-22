@@ -1,29 +1,12 @@
 package org.hibernate.reactive.benchmark.stealing;
 
-import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
-import org.hibernate.cfg.AvailableSettings;
-import org.hibernate.cfg.Configuration;
-import org.hibernate.engine.jdbc.spi.SqlExceptionHelper;
-import org.hibernate.engine.jdbc.spi.SqlStatementLogger;
-import org.hibernate.reactive.mutiny.Mutiny;
-import org.hibernate.reactive.pool.ReactiveConnectionPool;
-import org.hibernate.reactive.pool.impl.ExternalSqlClientPool;
-import org.hibernate.reactive.provider.ReactiveServiceRegistryBuilder;
-import org.hibernate.reactive.vertx.VertxInstance;
-
 import io.vertx.core.DeploymentOptions;
-import io.vertx.core.Vertx;
-import io.vertx.core.VertxOptions;
 import io.vertx.core.json.JsonObject;
-import io.vertx.pgclient.PgConnectOptions;
-import io.vertx.sqlclient.Pool;
-import io.vertx.sqlclient.PoolOptions;
 
 import org.HdrHistogram.Histogram;
 import org.openjdk.jmh.annotations.Benchmark;
@@ -70,103 +53,21 @@ public class ReactivePoolStealBenchmark {
 	@Param({"shared"})
 	String poolType;
 
-	private StealCounter stealCounter;
-
-	private Mutiny.SessionFactory sessionFactory;
-	private Vertx vertx;
-	private Pool sharedPool;
-	private PgConnectOptions connectOptions;
-	private PoolOptions poolOptions;
+	private ReactiveSetup setup;
 	private final AtomicInteger verticleIndex = new AtomicInteger();
 	private List<String> deploymentIds;
 
 	@Setup(Level.Trial)
 	public void setup() {
-		var vertxOptions = new VertxOptions().setEventLoopPoolSize( eventLoopCount );
-		vertx = Vertx.vertx( vertxOptions );
-
-		connectOptions = new PgConnectOptions()
-				.setHost( "localhost" )
-				.setPort( 5432 )
-				.setDatabase( "hibernate_orm_test" )
-				.setUser( "hibernate_orm_test" )
-				.setPassword( "hibernate_orm_test" )
-				.setCachePreparedStatements( false );
-		poolOptions = new PoolOptions().setMaxSize( poolSize ).setEventLoopSize( poolEventLoopSize );
-		stealCounter = new StealCounter( vertx );
-		sharedPool = stealCounter.wrap( createPool() );
-
-		var config = new Configuration();
-		config.addAnnotatedClass( World.class );
-		config.setProperty( AvailableSettings.JAKARTA_JDBC_URL,
-				"jdbc:postgresql://localhost/hibernate_orm_test?preparedStatementCacheQueries=0" );
-		config.setProperty( AvailableSettings.JAKARTA_JDBC_USER, "hibernate_orm_test" );
-		config.setProperty( AvailableSettings.JAKARTA_JDBC_PASSWORD, "hibernate_orm_test" );
-		config.setProperty( AvailableSettings.SHOW_SQL, "false" );
-		config.setProperty( AvailableSettings.FORMAT_SQL, "false" );
-		config.setProperty( AvailableSettings.HBM2DDL_AUTO, "create" );
-		config.setProperty( AvailableSettings.STATEMENT_BATCH_SIZE, "0" );
-		config.setProperty( "hibernate.generate_statistics", "false" );
-
-		var externalPool = new ExternalSqlClientPool(
-				sharedPool,
-				new SqlStatementLogger( false, false ),
-				new SqlExceptionHelper( true )
-		);
-
-		var srb = new ReactiveServiceRegistryBuilder()
-				.addService( VertxInstance.class, (VertxInstance) () -> vertx )
-				.addService( ReactiveConnectionPool.class, externalPool )
-				.applySettings( config.getProperties() );
-
-		sessionFactory = config.buildSessionFactory( srb.build() )
-				.unwrap( Mutiny.SessionFactory.class );
-
-		populateWorlds();
-		discardSetupConnections();
+		setup = new ReactiveSetup( eventLoopCount, poolType, poolSize, poolEventLoopSize );
 		deployVerticles();
-	}
-
-	/**
-	 * The connections opened so far (dialect detection, schema creation, {@link #populateWorlds()})
-	 * belong to the event loops of the contexts Vert.x created for the JMH thread, not to the verticles.
-	 * The pool keeps them open, so they would add steals that the benchmark doesn't intend to measure.
-	 */
-	private void discardSetupConnections() {
-		stealCounter.replace( createPool() )
-				.close().toCompletionStage().toCompletableFuture().join();
-	}
-
-	private Pool createPool() {
-		return switch ( poolType ) {
-			case "shared" -> Pool.pool( vertx, connectOptions, poolOptions );
-			case "perEventLoop" -> PerEventLoopPool.create( vertx, connectOptions, poolOptions );
-			default -> throw new IllegalArgumentException( "Unknown pool type: " + poolType );
-		};
-	}
-
-	private void populateWorlds() {
-		final int batchSize = 500;
-		for ( int batch = 0; batch < 10_000 / batchSize; batch++ ) {
-			final int start = batch * batchSize;
-			// A Uni chain 500 levels deep overflows the event loop stack: use persistAll
-			final Object[] worlds = new Object[batchSize];
-			for ( int i = 0; i < batchSize; i++ ) {
-				final World world = new World();
-				world.setId( start + i + 1 );
-				world.setRandomNumber( ThreadLocalRandom.current().nextInt( 10_000 ) );
-				worlds[i] = world;
-			}
-			sessionFactory.withTransaction( session -> session.persistAll( worlds ) )
-					.await().atMost( Duration.ofMinutes( 2 ) );
-		}
 	}
 
 	private void deployVerticles() {
 		deploymentIds = new ArrayList<>( eventLoopCount );
 		for ( int i = 0; i < eventLoopCount; i++ ) {
-			var verticle = new WorkerVerticle( sessionFactory, i );
-			var id = vertx.deployVerticle( verticle, new DeploymentOptions() )
+			var verticle = new WorkerVerticle( setup.sessionFactory, i );
+			var id = setup.vertx.deployVerticle( verticle, new DeploymentOptions() )
 					.toCompletionStage().toCompletableFuture().join();
 			deploymentIds.add( id );
 		}
@@ -174,29 +75,23 @@ public class ReactivePoolStealBenchmark {
 
 	@Setup(Level.Iteration)
 	public void resetStealCounter() {
-		stealCounter.reset();
+		setup.stealCounter.reset();
 	}
 
 	@TearDown(Level.Iteration)
 	public void reportStealCounter() {
-		System.out.println( "\n=== Steal: " + stealCounter.report() );
+		System.out.println( "\n=== Steal: " + setup.stealCounter.report() );
 	}
 
 	@TearDown(Level.Trial)
 	public void teardown() {
 		if ( deploymentIds != null ) {
 			for ( var id : deploymentIds ) {
-				vertx.undeploy( id ).toCompletionStage().toCompletableFuture().join();
+				setup.vertx.undeploy( id ).toCompletionStage().toCompletableFuture().join();
 			}
 		}
-		if ( sessionFactory != null ) {
-			sessionFactory.close();
-		}
-		if ( sharedPool != null ) {
-			sharedPool.close().toCompletionStage().toCompletableFuture().join();
-		}
-		if ( vertx != null ) {
-			vertx.close().toCompletionStage().toCompletableFuture().join();
+		if ( setup != null ) {
+			setup.close();
 		}
 	}
 
@@ -308,7 +203,7 @@ public class ReactivePoolStealBenchmark {
 
 	private void sendToVerticle(String address, int sleepMs) {
 		var msg = new JsonObject().put( "sleepMs", sleepMs );
-		vertx.eventBus().<String>request( address, msg )
+		setup.vertx.eventBus().<String>request( address, msg )
 				.toCompletionStage().toCompletableFuture().join();
 	}
 
@@ -335,6 +230,7 @@ public class ReactivePoolStealBenchmark {
 		bench.eventLoopCount = 2;
 		bench.sleepMs = 0;
 		bench.poolSize = 2;
+		bench.poolType = "shared";
 		bench.setup();
 
 		try {

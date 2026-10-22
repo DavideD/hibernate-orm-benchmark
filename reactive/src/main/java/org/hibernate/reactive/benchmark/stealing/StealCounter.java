@@ -98,6 +98,14 @@ final class StealCounter {
 		requestsPerLoop.clear();
 	}
 
+	long acquired() {
+		return local.sum() + stolen.sum();
+	}
+
+	long stolen() {
+		return stolen.sum();
+	}
+
 	String report() {
 		long l = local.sum();
 		long s = stolen.sum();
