@@ -282,3 +282,49 @@ What the numbers show:
   `preferLocalWait` is what limits that wait.
 - `never` is about 5 µs per request slower than `PerEventLoopPool` (section 7), likely the cost of wrapping
   the connections, which all the `StealPolicyPool` policies pay.
+
+## 9. Releases still in the queue of the pool
+
+The Vert.x pool (`SimpleConnectionPool`) processes all its actions (acquire, release, ...) from a single queue,
+in the order they're submitted (`CombinerExecutor`). So an acquisition can find no free connection on its event loop,
+and steal one or wait, while the release of a connection of its event loop is already in the queue, behind it.
+Processing the pending releases before an acquisition would let it see that connection.
+
+`AffinityProbe` measures how often that happens. It replaces the private executor of the pool with one that counts
+the releases submitted but not processed yet, for each event loop. When the pool processes an acquisition that finds
+no free connection on its event loop, the probe checks whether a release for that event loop is pending.
+It also measures how long until the pool processes the release of a connection of that event loop.
+A connection released by another event loop (a thief) is submitted to the pool right away, when it's closed,
+so the probe sees these releases too.
+To check it, a test version that slowed down each acquisition by 200 µs counted 7.9% missed acquisitions.
+
+```
+POOL_TYPES=shared ./run_OpenLoopSteal.sh poolSize=4 probe=true
+```
+
+Results (shared pool, one 20 s run each). "No local" is the acquisitions that found no free connection
+on their event loop, "missed" the ones of those with a release of their event loop pending:
+
+| Setup | Requests/s | Busiest loop | Stolen | No local | Missed | Time to a local release (p50 / p90) |
+|---|---|---|---|---|---|---|
+| 4 loops, 1 connection each | 1000 | 4% | 15% | 15% | < 0.05% | 374 / 502 µs |
+| 4 loops, 1 connection each | 2000 | 8% | 34% | 35% | < 0.05% | 369 / 484 µs |
+| 4 loops, 1 connection each | 4000 | 17% | 63% | 72% | < 0.05% | 387 / 500 µs |
+| 4 loops, 1 connection each | 8000 | 34% | 75% | 97% | < 0.05% | 290 / 457 µs |
+| 4 loops, 2 connections each, loads 4:2:1:1 | 2000 | 11% | 11% | 11% | < 0.05% | 371 / 504 µs |
+| 4 loops, 2 connections each, loads 4:2:1:1 | 4000 | 22% | 36% | 37% | < 0.05% | 460 / 645 µs |
+| 4 loops, 2 connections each, loads 4:2:1:1 | 8000 | 43% | 66% | 81% | < 0.05% | 410 / 661 µs |
+| 8 loops, 1 connection each | 2000 | 6% | 16% | 16% | < 0.05% | 387 / 512 µs |
+| 8 loops, 1 connection each | 4000 | 12% | 39% | 39% | < 0.05% | 422 / 562 µs |
+| 8 loops, 1 connection each | 8000 | 22% | 79% | 84% | < 0.05% | 477 / 610 µs |
+
+What the numbers show:
+
+- In these workloads, an acquisition almost never misses a release that's already in the queue.
+  Processing the pending releases first wouldn't change how often connections are stolen.
+- The local connection usually gets free 0.3–0.5 ms later: it's still in use, running the rest of its session.
+  That's why `preferLocalWait` with 1 ms (section 8) avoids almost all the steals: it waits for these connections.
+- This could be different with other workloads, for example very short sessions or many more event loops,
+  where releases and acquisitions happen closer together. The probe can check that.
+- The probe adds some work to every action of the pool (about 3% more CPU per request here),
+  so it's off by default. Only tested with Vert.x 4.5.
