@@ -60,6 +60,9 @@ public final class OpenLoopStealBenchmark {
 		DEFAULTS.put( "warmupSeconds", "10" );
 		DEFAULTS.put( "durationSeconds", "20" );
 		DEFAULTS.put( "seed", "42" );
+		// Count the acquisitions that miss a connection of their event loop because its release is still in the
+		// queue of the pool (shared pool only, see AffinityProbe). It adds some work to the pool.
+		DEFAULTS.put( "probe", "false" );
 	}
 
 	public static void main(String[] args) throws Exception {
@@ -83,6 +86,10 @@ public final class OpenLoopStealBenchmark {
 		long warmupSeconds = Long.parseLong( options.get( "warmupSeconds" ) );
 		long durationSeconds = Long.parseLong( options.get( "durationSeconds" ) );
 		long seed = Long.parseLong( options.get( "seed" ) );
+		boolean probe = Boolean.parseBoolean( options.get( "probe" ) );
+		if ( probe && !"shared".equals( poolType ) ) {
+			throw new IllegalArgumentException( "probe only works with poolType=shared" );
+		}
 		if ( weights.length != eventLoops ) {
 			throw new IllegalArgumentException( "weights needs one value per event loop: " + options.get( "weights" ) );
 		}
@@ -95,7 +102,8 @@ public final class OpenLoopStealBenchmark {
 
 		var setup = new ReactiveSetup( eventLoops, poolType, poolSize, poolEventLoopSize, localWaitMs );
 		try {
-			run( setup, options, rate, weights, queriesPerSession, warmupSeconds, durationSeconds, seed );
+			AffinityProbe affinityProbe = probe ? AffinityProbe.install( setup.stealCounter.delegate(), setup.vertx ) : null;
+			run( setup, affinityProbe, options, rate, weights, queriesPerSession, warmupSeconds, durationSeconds, seed );
 		}
 		finally {
 			setup.close();
@@ -104,6 +112,7 @@ public final class OpenLoopStealBenchmark {
 
 	private static void run(
 			ReactiveSetup setup,
+			AffinityProbe affinityProbe,
 			Map<String, String> options,
 			double rate,
 			double[] weights,
@@ -130,6 +139,9 @@ public final class OpenLoopStealBenchmark {
 			join( verticle.startRecording() );
 		}
 		setup.stealCounter.reset();
+		if ( affinityProbe != null ) {
+			affinityProbe.reset();
+		}
 		Snapshot before = Snapshot.take( eventLoops );
 
 		System.out.printf( "Measuring for %d s%n", durationSeconds );
@@ -139,6 +151,7 @@ public final class OpenLoopStealBenchmark {
 		long stolen = setup.stealCounter.stolen();
 		long acquired = setup.stealCounter.acquired();
 		String stealReport = setup.stealCounter.report();
+		AffinityProbe.Results affinity = affinityProbe == null ? null : affinityProbe.results();
 		Histogram latency = new Histogram( TimeUnit.SECONDS.toNanos( 60 ), 3 );
 		long completed = 0;
 		long failed = 0;
@@ -184,6 +197,21 @@ public final class OpenLoopStealBenchmark {
 				latency.getValueAtPercentile( 99 ) / 1e3, latency.getValueAtPercentile( 99.9 ) / 1e3,
 				latency.getMaxValue() / 1e3 );
 
+		String affinityResult = "";
+		if ( affinity != null ) {
+			Histogram wait = affinity.timeToLocalRelease();
+			double noLocalFreePct = affinity.acquisitions() == 0 ? 0 : 100.0 * affinity.noLocalFree() / affinity.acquisitions();
+			double missedPct = affinity.noLocalFree() == 0 ? 0 : 100.0 * affinity.missed() / affinity.noLocalFree();
+			System.out.printf( "Pool: %d acquisitions, %.1f%% found no free connection on their event loop,"
+							+ " %.1f%% of those while the release of one was in the queue of the pool%n",
+					affinity.acquisitions(), noLocalFreePct, missedPct );
+			System.out.printf( "Time until the release of a connection of the same event loop (us): p50 %.0f, p90 %.0f, p99 %.0f%n",
+					wait.getValueAtPercentile( 50 ) / 1e3, wait.getValueAtPercentile( 90 ) / 1e3, wait.getValueAtPercentile( 99 ) / 1e3 );
+			affinityResult = String.format( " noLocalFreePct=%.1f missedPct=%.1f toLocalReleaseP50Us=%.0f toLocalReleaseP90Us=%.0f toLocalReleaseP99Us=%.0f",
+					noLocalFreePct, missedPct, wait.getValueAtPercentile( 50 ) / 1e3, wait.getValueAtPercentile( 90 ) / 1e3,
+					wait.getValueAtPercentile( 99 ) / 1e3 );
+		}
+
 		// One line with everything, for scripts
 		var result = new StringBuilder( "RESULT" );
 		options.forEach( (key, value) -> result.append( ' ' ).append( key ).append( '=' ).append( value ) );
@@ -198,6 +226,7 @@ public final class OpenLoopStealBenchmark {
 				latency.getValueAtPercentile( 99 ) / 1e3, latency.getValueAtPercentile( 99.9 ) / 1e3,
 				latency.getMaxValue() / 1e3
 		) );
+		result.append( affinityResult );
 		System.out.println( result );
 	}
 

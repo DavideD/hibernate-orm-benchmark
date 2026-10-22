@@ -110,4 +110,23 @@ awk '
 	printf "%6s %-16s %8s %8s %8s %9s %8s %8s %7s %7s %7s %7s\n" rate poolType "req/s" stolen "CPU%" "max loop" "CPU us" sleeps "p50 us" "p99 us" "p99.9" failed
 	cat
 }
+
+# With probe=true: the acquisitions that missed a connection of their event loop
+if grep -q 'missedPct=' "$results"; then
+	echo ""
+	echo "no local: acquisitions that found no free connection on their event loop."
+	echo "missed: of those, the ones where the release of a connection of their event loop was in the queue of the pool."
+	echo "to local release: time until the pool processed the release of a connection of their event loop."
+	awk '
+		/missedPct=/ {
+			delete r
+			for ( i = 2; i <= NF; i++ ) { split( $i, kv, "=" ); r[kv[1]] = kv[2] }
+			printf "%6s %-16s %8s%% %8s%% %8s%% %10s %10s %10s\n", r["rate"], r["poolType"], r["stolenPct"], r["noLocalFreePct"],
+				r["missedPct"], r["toLocalReleaseP50Us"], r["toLocalReleaseP90Us"], r["toLocalReleaseP99Us"]
+		}
+	' "$results" | sort -n -k1,1 -s | {
+		printf "%6s %-16s %9s %9s %9s %10s %10s %10s\n" rate poolType stolen "no local" missed "p50 us" "p90 us" "p99 us"
+		cat
+	}
+fi
 rm -f "$results"
