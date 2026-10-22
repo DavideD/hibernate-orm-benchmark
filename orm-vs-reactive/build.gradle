@@ -1,0 +1,42 @@
+plugins {
+    id 'org.hibernate.orm.java-conventions'
+    id 'application'
+}
+
+// Compares Hibernate ORM (blocking JDBC) with Hibernate Reactive at the same open loop request rate
+// and finds the highest rate each one sustains, see OrmVsReactiveBenchmark.
+// The reactive side is the one of the reactive-openloop module (ReactiveLoad), built with -Pstack=vertx5:
+// Hibernate Reactive 4.5 and the ORM 7.4 it is built with. The ORM side uses the same ORM version.
+
+def stack = project.findProperty("stack")
+if ( "vertx5" != stack ) {
+    throw new GradleException( "Build this module with -Pstack=vertx5 (the ORM version must be the one of Hibernate Reactive)" )
+}
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_21
+    targetCompatibility = JavaVersion.VERSION_21
+}
+
+dependencies {
+    implementation project( ':hibernate-orm-benchmark-reactive-openloop' )
+
+    implementation 'org.hibernate.orm:hibernate-core:7.4.13.Final'
+    implementation 'org.hibernate.orm:hibernate-agroal:7.4.13.Final'
+    runtimeOnly 'org.postgresql:postgresql:42.7.7'
+
+    // Same as the reactive-openloop module
+    runtimeOnly 'com.ongres.scram:scram-client:3.2'
+    implementation 'org.hdrhistogram:HdrHistogram:2.2.2'
+
+    // -Pepoll=<Netty version>: use the native epoll transport (Vert.x does when it's on the classpath)
+    if ( project.findProperty("epoll") ) {
+        runtimeOnly "io.netty:netty-transport-native-epoll:${project.findProperty("epoll")}:linux-x86_64"
+    }
+}
+
+description = 'hibernate-orm-benchmark-orm-vs-reactive'
+
+application {
+    mainClass = 'org.hibernate.benchmark.comparison.OrmVsReactiveBenchmark'
+}
