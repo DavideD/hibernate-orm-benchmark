@@ -14,7 +14,7 @@ import io.vertx.core.Vertx;
 import io.vertx.core.internal.ContextInternal;
 import io.vertx.core.internal.VertxInternal;
 import io.vertx.sqlclient.SqlConnection;
-import io.vertx.sqlclient.impl.SocketConnectionBase;
+import io.vertx.sqlclient.codec.SocketConnectionBase;
 import io.vertx.sqlclient.internal.SqlConnectionInternal;
 
 /**
