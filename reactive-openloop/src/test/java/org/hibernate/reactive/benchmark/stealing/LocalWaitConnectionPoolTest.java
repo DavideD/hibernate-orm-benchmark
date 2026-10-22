@@ -315,6 +315,85 @@ class LocalWaitConnectionPoolTest {
 		}
 	}
 
+	@Test
+	void theEvictedConnectionsAreTheOnesNotInUseAndTheirPlaceIsFree() {
+		try (var h = twoLoops()) {
+			Request a = h.acquire( 0 );
+			Request b = h.acquire( 1 );
+			var aConnection = a.connection();
+			a.release();
+
+			// Idle timeout and maximum lifetime: only the connection that isn't in use goes
+			assertEquals( List.of( aConnection ), h.evict() );
+			assertEquals( 1, h.pool.size() );
+
+			// The pool opens another one
+			Request c = h.acquire( 0 );
+			assertEquals( 0, c.connection().loop() );
+			assertFalse( c.connection().equals( aConnection ) );
+			assertEquals( 2, h.pool.size() );
+			b.release();
+		}
+	}
+
+	@Test
+	void aClosedConnectionIsReplacedForTheOldestWaiter() {
+		try (var h = twoLoops()) {
+			Request a = h.acquire( 0 );
+			h.acquire( 1 );
+			Request waiter = h.acquire( 1 );
+			Request other = h.acquire( 0 );
+
+			// The oldest waiter, whatever its event loop, gets the new connection. It opens on the event loop that lost
+			// its connection, the only one under its share, and not on the event loop of the waiter
+			h.close( a.connection() );
+
+			assertEquals( 0, waiter.connection().loop() );
+			assertFalse( a.connection().equals( waiter.connection() ) );
+			assertTrue( waiter.timer().cancelled );
+			assertFalse( other.isServed() );
+			assertEquals( 2, h.pool.size() );
+
+			// The connection of the lease that was closed isn't used again
+			a.release();
+			assertFalse( other.isServed() );
+			waiter.release();
+			assertEquals( 1, other.served() );
+		}
+	}
+
+	@Test
+	void aConnectionThatFailsToOpenFailsItsRequestAndTheNextWaiterOpensAnother() {
+		try (var h = twoLoops()) {
+			Request a = h.acquire( 0 );
+			h.acquire( 1 );
+			Request first = h.acquire( 0 );
+			Request second = h.acquire( 1 );
+
+			h.failNextConnect();
+			h.close( a.connection() );
+
+			assertEquals( "Can't connect", first.failure().getMessage() );
+			assertFalse( first.isServed() );
+			assertEquals( 1, second.served() );
+			assertEquals( 0, h.pool.waiters() );
+			assertTrue( h.timers.stream().allMatch( t -> t.cancelled ) );
+			assertEquals( 2, h.pool.size() );
+		}
+	}
+
+	@Test
+	void aRequestWhenThePoolIsNotFullThatFailsToOpenAConnectionFreesItsPlace() {
+		try (var h = twoLoops()) {
+			h.failNextConnect();
+			Request failed = h.acquire( 0 );
+			assertEquals( "Can't connect", failed.failure().getMessage() );
+			assertEquals( 0, h.pool.size() );
+			assertEquals( 0, h.pool.requests() );
+			assertEquals( 0, h.acquire( 0 ).connection().loop() );
+		}
+	}
+
 	/**
 	 * Random requests, releases and deadlines. Whatever the order is, a connection is never held by 2 requests,
 	 * and once everything is released and all the deadlines are over, every request has been served exactly once.

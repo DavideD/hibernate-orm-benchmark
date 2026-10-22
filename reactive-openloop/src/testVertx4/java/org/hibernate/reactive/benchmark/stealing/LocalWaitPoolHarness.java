@@ -63,6 +63,7 @@ final class LocalWaitPoolHarness implements AutoCloseable {
 		private final AtomicInteger served = new AtomicInteger();
 		private volatile Lease<FakeConnection> lease;
 		private volatile PoolWaiter<FakeConnection> waiter;
+		private volatile Throwable failure;
 		private Timer timer;
 		private boolean released;
 
@@ -79,6 +80,13 @@ final class LocalWaitPoolHarness implements AutoCloseable {
 
 		boolean isServed() {
 			return served.get() > 0;
+		}
+
+		/**
+		 * @return why the pool couldn't give a connection to this request, or null
+		 */
+		Throwable failure() {
+			return failure;
 		}
 
 		FakeConnection connection() {
@@ -115,6 +123,8 @@ final class LocalWaitPoolHarness implements AutoCloseable {
 	final LocalWaitStats stats = new LocalWaitStats();
 	final LocalWaitConnectionPool<FakeConnection> pool;
 	private final AtomicInteger connectionIds = new AtomicInteger();
+	private final java.util.Map<Integer, PoolConnector.Listener> listeners = new java.util.concurrent.ConcurrentHashMap<>();
+	private volatile boolean failNextConnect;
 
 	/**
 	 * @param maxSize the maximum number of connections
@@ -149,7 +159,13 @@ final class LocalWaitPoolHarness implements AutoCloseable {
 	private final class FakeConnector implements PoolConnector<FakeConnection> {
 		@Override
 		public void connect(ContextInternal context, Listener listener, Handler<AsyncResult<ConnectResult<FakeConnection>>> handler) {
+			if ( failNextConnect ) {
+				failNextConnect = false;
+				handler.handle( Future.failedFuture( new IllegalStateException( "Can't connect" ) ) );
+				return;
+			}
 			var connection = new FakeConnection( loops.indexOf( context.nettyEventLoop() ), connectionIds.getAndIncrement() );
+			listeners.put( connection.id(), listener );
 			handler.handle( Future.succeededFuture( new ConnectResult<>( connection, 1, 0 ) ) );
 		}
 
@@ -177,16 +193,45 @@ final class LocalWaitPoolHarness implements AutoCloseable {
 			}
 		}, 0, result -> {
 			if ( result.failed() ) {
-				throw new IllegalStateException( result.cause() );
+				request.failure = result.cause();
 			}
-			request.lease = result.result();
-			request.served.incrementAndGet();
+			else {
+				request.lease = result.result();
+				request.served.incrementAndGet();
+			}
 		} );
 		drain();
 		if ( timers.size() > timersBefore ) {
 			request.timer = timers.get( timers.size() - 1 );
 		}
 		return request;
+	}
+
+	/**
+	 * The next connection the pool opens fails.
+	 */
+	void failNextConnect() {
+		failNextConnect = true;
+	}
+
+	/**
+	 * The connection is closed: it tells the pool to remove it, like the connections of the SQL client do.
+	 */
+	void close(FakeConnection connection) {
+		listeners.get( connection.id() ).onRemove();
+		drain();
+	}
+
+	/**
+	 * Evict the connections that aren't in use, like the idle timeout and the maximum lifetime do.
+	 *
+	 * @return the connections that were evicted
+	 */
+	List<FakeConnection> evict() {
+		List<FakeConnection> evicted = new ArrayList<>();
+		pool.evict( connection -> true, result -> evicted.addAll( result.result() ) );
+		drain();
+		return evicted;
 	}
 
 	/**
