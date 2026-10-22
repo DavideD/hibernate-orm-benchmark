@@ -9,6 +9,7 @@ import java.util.List;
 
 import io.netty.channel.EventLoop;
 import io.netty.util.concurrent.EventExecutor;
+import io.vertx.core.Context;
 import io.vertx.core.Vertx;
 import io.vertx.core.internal.ContextInternal;
 import io.vertx.core.internal.VertxInternal;
@@ -17,7 +18,7 @@ import io.vertx.sqlclient.impl.SocketConnectionBase;
 import io.vertx.sqlclient.internal.SqlConnectionInternal;
 
 /**
- * Access to the Vert.x 5 internals needed by {@link StealCounter}.
+ * Access to the Vert.x 5 internals needed by {@link StealCounter} and {@link PerEventLoopPool}.
  * Vert.x 4 has these classes in other packages, see the copy in {@code src/vertx4/java}.
  */
 final class VertxInternals {
@@ -34,6 +35,13 @@ final class VertxInternals {
 	}
 
 	/**
+	 * @return the event loop of a context
+	 */
+	static EventLoop eventLoopOf(Context context) {
+		return ( (ContextInternal) context ).nettyEventLoop();
+	}
+
+	/**
 	 * @return the socket connection of a connection obtained from a pool.
 	 * The pool wraps it in a new object each time, the socket stays the same.
 	 */
@@ -46,7 +54,7 @@ final class VertxInternals {
 	 */
 	static EventLoop eventLoopOf(SqlConnection connection) {
 		var socket = (SocketConnectionBase) socketOf( connection );
-		return ( (ContextInternal) socket.context() ).nettyEventLoop();
+		return eventLoopOf( socket.context() );
 	}
 
 	static List<EventLoop> eventLoops(Vertx vertx) {
