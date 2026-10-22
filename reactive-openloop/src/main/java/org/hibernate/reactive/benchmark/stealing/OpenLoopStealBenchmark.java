@@ -46,6 +46,7 @@ public final class OpenLoopStealBenchmark {
 		DEFAULTS.put( "eventLoops", "4" );
 		// shared, perEventLoop (no stealing, poolSize / eventLoops connections per event loop),
 		// releasesFirst (shared, processes the releases of connections first, see ReleasesFirstExecutor),
+		// localWait (shared, a request waits a little for a connection of its event loop, see LocalWaitPool),
 		// or a StealPolicyPool policy: always, alwaysActive, preferLocalWait, never
 		DEFAULTS.put( "poolType", "shared" );
 		DEFAULTS.put( "poolSize", "16" );
@@ -53,6 +54,12 @@ public final class OpenLoopStealBenchmark {
 		DEFAULTS.put( "poolEventLoopSize", "4" );
 		// How long preferLocalWait waits for a connection of the same event loop
 		DEFAULTS.put( "localWaitMs", "1" );
+		// localWait: how long a request waits for a connection of its event loop, in microseconds
+		DEFAULTS.put( "localWaitUs", "500" );
+		// localWait: skip the wait if the event loop has more than this many local waiters per connection (0 = never skip)
+		DEFAULTS.put( "localWaitDepth", "0" );
+		// localWait: open the new connections on the event loop of the request that needs them
+		DEFAULTS.put( "creationAffinity", "true" );
 		// Total requests per second, for all the event loops
 		DEFAULTS.put( "rate", "2000" );
 		// How the rate is split between the event loops
@@ -94,17 +101,19 @@ public final class OpenLoopStealBenchmark {
 		if ( weights.length != eventLoops ) {
 			throw new IllegalArgumentException( "weights needs one value per event loop: " + options.get( "weights" ) );
 		}
-		if ( !"shared".equals( poolType ) && !"releasesFirst".equals( poolType ) ) {
+		if ( !"shared".equals( poolType ) && !"releasesFirst".equals( poolType ) && !"localWait".equals( poolType ) ) {
 			// Only the shared pools use it, show it in the results
 			options.put( "poolEventLoopSize", "0" );
 			poolEventLoopSize = 0;
 		}
 		System.out.println( "Options: " + options );
 
-		var setup = new ReactiveSetup( eventLoops, poolType, poolSize, poolEventLoopSize, localWaitMs );
+		var localWait = new LocalWaitConfig( Long.parseLong( options.get( "localWaitUs" ) ), Integer.parseInt( options.get( "localWaitDepth" ) ),
+				Boolean.parseBoolean( options.get( "creationAffinity" ) ), new LocalWaitStats() );
+		var setup = new ReactiveSetup( eventLoops, poolType, poolSize, poolEventLoopSize, localWaitMs, localWait );
 		try {
 			AffinityProbe affinityProbe = probe ? AffinityProbe.install( setup.stealCounter.delegate(), setup.vertx ) : null;
-			run( setup, affinityProbe, options, rate, weights, queriesPerSession, warmupSeconds, durationSeconds, seed );
+			run( setup, affinityProbe, "localWait".equals( poolType ) ? localWait.stats() : null, options, rate, weights, queriesPerSession, warmupSeconds, durationSeconds, seed );
 		}
 		finally {
 			setup.close();
@@ -114,6 +123,7 @@ public final class OpenLoopStealBenchmark {
 	private static void run(
 			ReactiveSetup setup,
 			AffinityProbe affinityProbe,
+			LocalWaitStats localWaitStats,
 			Map<String, String> options,
 			double rate,
 			double[] weights,
@@ -142,6 +152,9 @@ public final class OpenLoopStealBenchmark {
 		setup.stealCounter.reset();
 		if ( affinityProbe != null ) {
 			affinityProbe.reset();
+		}
+		if ( localWaitStats != null ) {
+			localWaitStats.reset();
 		}
 		Snapshot before = Snapshot.take( eventLoops );
 
@@ -198,6 +211,11 @@ public final class OpenLoopStealBenchmark {
 				latency.getValueAtPercentile( 99 ) / 1e3, latency.getValueAtPercentile( 99.9 ) / 1e3,
 				latency.getMaxValue() / 1e3 );
 
+		String localWaitResult = "";
+		if ( localWaitStats != null ) {
+			localWaitResult = reportLocalWait( localWaitStats, acquired );
+		}
+
 		String affinityResult = "";
 		if ( affinity != null ) {
 			Histogram wait = affinity.timeToLocalRelease();
@@ -227,8 +245,32 @@ public final class OpenLoopStealBenchmark {
 				latency.getValueAtPercentile( 99 ) / 1e3, latency.getValueAtPercentile( 99.9 ) / 1e3,
 				latency.getMaxValue() / 1e3
 		) );
-		result.append( affinityResult );
+		result.append( affinityResult ).append( localWaitResult );
 		System.out.println( result );
+	}
+
+	/**
+	 * @return the results of {@code poolType=localWait} for the RESULT line
+	 */
+	private static String reportLocalWait(LocalWaitStats stats, long acquired) {
+		long waits = stats.localWaits.sum();
+		long expired = stats.expiredStolen.sum() + stats.expiredQueued.sum();
+		long shortcuts = stats.depthShortcuts.sum();
+		Histogram wait = stats.localWaitHistogram();
+		Histogram late = stats.expiryLatenessHistogram();
+		System.out.printf( "Local wait: %d of %d acquisitions waited for a local connection; %d served by a local release,"
+						+ " %d took a free connection when the wait ended, %d joined the queue, %d served after that;"
+						+ " %d skipped the wait (depth), %d (no local connection); %d connections opened on the requester's loop%n",
+				waits, acquired, stats.servedLocal.sum(), stats.expiredStolen.sum(), stats.expiredQueued.sum(),
+				stats.servedAfterExpiry.sum(), shortcuts, stats.noLocalConnection.sum(), stats.affinityCreations.sum() );
+		System.out.printf( "Time waited for a local release (us): p50 %.0f, p99 %.0f; the wait ended after the deadline by (us): p50 %.0f, p99 %.0f%n",
+				wait.getValueAtPercentile( 50 ) / 1e3, wait.getValueAtPercentile( 99 ) / 1e3,
+				late.getValueAtPercentile( 50 ) / 1e3, late.getValueAtPercentile( 99 ) / 1e3 );
+		return String.format( " lwWaitPct=%.1f lwServedLocalPct=%.1f lwExpiredPct=%.1f lwShortcutPct=%.1f lwWaitP50Us=%.0f lwWaitP99Us=%.0f lwLateP50Us=%.0f lwLateP99Us=%.0f",
+				acquired == 0 ? 0.0 : 100.0 * waits / acquired, waits == 0 ? 0.0 : 100.0 * stats.servedLocal.sum() / waits,
+				waits == 0 ? 0.0 : 100.0 * expired / waits, acquired == 0 ? 0.0 : 100.0 * shortcuts / acquired,
+				wait.getValueAtPercentile( 50 ) / 1e3, wait.getValueAtPercentile( 99 ) / 1e3,
+				late.getValueAtPercentile( 50 ) / 1e3, late.getValueAtPercentile( 99 ) / 1e3 );
 	}
 
 	private static void stopLoad(List<LoadVerticle> verticles) throws InterruptedException {

@@ -12,10 +12,12 @@
 #
 # Options and defaults: eventLoops=4 poolSize=16 poolEventLoopSize=4 weights=1,1,1,1 queriesPerSession=5
 #                       warmupSeconds=10 durationSeconds=20 seed=42
+#                       localWaitMs=1 (preferLocalWait) localWaitUs=500 localWaitDepth=0 creationAffinity=true (localWait)
 #
 # Environment variables:
 #   RATES         Total requests per second to test (default: "1000 2000 4000")
-#   POOL_TYPES    Pools to test (default: "shared perEventLoop")
+#   POOL_TYPES    Pools to test (default: "shared perEventLoop"), also: releasesFirst, localWait,
+#                 always, alwaysActive, preferLocalWait, never
 #   REPEAT        Runs for each combination (default: 1)
 #   JAVA_HOME     JDK used for Gradle and the benchmark (default: a JDK 21 in /usr/lib/jvm, Gradle 8.4 can't run on 25)
 #   PODMAN        Container command (default: podman, or "sudo podman" if rootless podman doesn't work)

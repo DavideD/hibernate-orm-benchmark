@@ -39,6 +39,7 @@ final class ReactiveSetup {
 
 	private final String poolType;
 	private final long localWaitMs;
+	private final LocalWaitConfig localWait;
 	private final PgConnectOptions connectOptions;
 	private final PoolOptions poolOptions;
 
@@ -46,15 +47,19 @@ final class ReactiveSetup {
 	 * @param poolType {@code shared} for one pool for all the event loops (like Quarkus),
 	 * {@code perEventLoop} for one pool per event loop with {@code poolSize / eventLoopCount} connections each,
 	 * {@code releasesFirst} for a shared pool that processes the releases of connections first ({@link ReleasesFirstExecutor}),
+	 * {@code localWait} for a shared pool where a request waits a little for a connection of its event loop ({@link LocalWaitConfig}),
 	 * or a {@link StealPolicyPool.Policy} in camel case ({@code always}, {@code alwaysActive}, {@code preferLocalWait},
 	 * {@code never}) for a {@link StealPolicyPool}
 	 * @param poolEventLoopSize when &gt; 0, spreads the connections of the shared pool across the event loops
 	 * like Quarkus does ({@link PoolOptions#setEventLoopSize(int)})
 	 * @param localWaitMs how long {@code preferLocalWait} waits for a connection of the same event loop
+	 * @param localWait the settings of {@code localWait}, a shared pool that waits for a connection of the same
+	 * event loop ({@code LocalWaitPool})
 	 */
-	ReactiveSetup(int eventLoopCount, String poolType, int poolSize, int poolEventLoopSize, long localWaitMs) {
+	ReactiveSetup(int eventLoopCount, String poolType, int poolSize, int poolEventLoopSize, long localWaitMs, LocalWaitConfig localWait) {
 		this.poolType = poolType;
 		this.localWaitMs = localWaitMs;
+		this.localWait = localWait;
 		vertx = Vertx.vertx( new VertxOptions().setEventLoopPoolSize( eventLoopCount ) );
 
 		connectOptions = new PgConnectOptions()
@@ -113,6 +118,7 @@ final class ReactiveSetup {
 			case "shared" -> Pool.pool( vertx, connectOptions, poolOptions );
 			case "perEventLoop" -> PerEventLoopPool.create( vertx, connectOptions, poolOptions );
 			case "releasesFirst" -> ReleasesFirstExecutor.createPool( vertx, connectOptions, poolOptions );
+			case "localWait" -> LocalWaitPool.createPool( vertx, connectOptions, poolOptions, localWait );
 			default -> StealPolicyPool.create( vertx, connectOptions, poolOptions, policy(), localWaitMs );
 		};
 	}
@@ -123,7 +129,7 @@ final class ReactiveSetup {
 		}
 		catch (IllegalArgumentException e) {
 			throw new IllegalArgumentException( "Unknown pool type: " + poolType
-					+ " (valid: shared, perEventLoop, releasesFirst, always, alwaysActive, preferLocalWait, never)", e );
+					+ " (valid: shared, perEventLoop, releasesFirst, localWait, always, alwaysActive, preferLocalWait, never)", e );
 		}
 	}
 
