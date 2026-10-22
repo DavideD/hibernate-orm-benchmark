@@ -12,6 +12,9 @@ def stack = project.findProperty("stack")
 // StealCounter and AffinityProbe need Vert.x internal classes that moved packages in Vert.x 5
 sourceSets.main.java.srcDir( "vertx5" == stack ? 'src/vertx5/java' : 'src/vertx4/java' )
 
+// The tests of LocalWaitConnectionPool use the pool internals too
+sourceSets.test.java.srcDir( "vertx5" == stack ? 'src/testVertx5/java' : 'src/testVertx4/java' )
+
 dependencies {
     // The ORM and Vert.x versions are the ones each Hibernate Reactive release is built with
     if ( "6.6" == stack ) {
@@ -34,6 +37,13 @@ dependencies {
 
     // HDR Histogram for latency measurements
     implementation 'org.hdrhistogram:HdrHistogram:2.2.2'
+
+    testImplementation 'org.junit.jupiter:junit-jupiter:5.10.2'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher:1.10.2'
+}
+
+test {
+    useJUnitPlatform()
 }
 
 description = 'hibernate-orm-benchmark-reactive-openloop'
