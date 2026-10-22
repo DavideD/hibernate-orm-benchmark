@@ -85,7 +85,7 @@ else
 	echo "WARNING: ASYNC_PROFILER_HOME not set, running without async-profiler"
 fi
 
-./gradlew :hibernate-orm-benchmark-reactive:jmhJar ${1:+-Pversion=$1}
+./gradlew :hibernate-orm-benchmark-reactive:jmhJar ${1:+-Pstack=$1}
 
 JAR=reactive/target/libs/hibernate-orm-benchmark-reactive-1.0-SNAPSHOT-jmh.jar
 
