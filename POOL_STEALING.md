@@ -80,26 +80,37 @@ The options on the table:
 
 ## 6. What this means for the benchmark
 
-`ReactivePoolStealBenchmark` counts stolen connections (`StealCounter`) and prints the ratio after each iteration.
-Run it with `./run_PoolStealCounter.sh` (see `--help` for the options).
+`ReactivePoolStealBenchmark` counts stolen connections (`StealCounter`) and prints, after each iteration,
+the ratio and how many connections and requests each event loop has.
+Run it with `./run_PoolStealCounter.sh` (see `--help` for the options, `STACK=vertx5` builds with Vert.x 5).
+
+The setup (dialect detection, schema creation, test data) runs on the JMH thread,
+and Vert.x gives that thread a context on an event loop that isn't the verticles' one.
+The connections it opens stay in the pool, so the benchmark replaces the pool with a fresh one before deploying the verticles.
+Without this, all the connections opened during the setup count as steals:
+it's what made the plain pool look like it stole 25% of the connections in the third scenario below.
 
 Results from short runs (one fork, 5 s measurement, `sleepMs=1` unless noted):
 
 | Scenario | Stolen | ops/s |
 |---|---|---|
-| 2 threads, pool 2, 2 loops (original setup) | 0% | 905 |
+| 2 threads, pool 2, 2 loops (original setup) | 0% | 906 |
 | Same, with `poolEventLoopSize=2` (Quarkus-like) | 0% | 905 |
-| 16 threads, pool 2, 2 loops (pool full) | 48.7% | 911 |
-| Same, with `poolEventLoopSize=2` | 49.3% | 917 |
-| All requests on loop 0, pool 8, 4 loops, 8 threads, plain pool | 24.8% | 3,711 |
-| Same, with `poolEventLoopSize=4` | 74.8% | 3,714 |
+| 16 threads, pool 2, 2 loops (pool full) | 49.6% | 919 |
+| Same, with `poolEventLoopSize=2` | 50.0% | 916 |
+| All requests on loop 0, pool 8, 4 loops, 8 threads, plain pool | 0% | 3,738 |
+| Same, with `poolEventLoopSize=4` | 74.9% | 3,703 |
 | `sleepMs=0`, requests spread evenly, pool 8, 4 loops, 8 threads | 0% | ~63k |
+| Same, with `poolEventLoopSize=4` | 0% | ~63k |
+
+Vert.x 5 (`STACK=vertx5`) gives the same ratios.
 
 What the numbers show:
 
-- A full pool is what triggers stealing. The Quarkus setting alone does nothing.
-- The Quarkus setting makes it worse when one loop is busier than the others:
-  about (N-1)/N of the connections end up on other loops.
+- When the requests are spread evenly and there's a free connection, nothing is stolen, with or without the Quarkus setting.
+- A full pool causes stealing: the wait queue hands connections out in arrival order, whatever the loop.
+- When one loop is busier than the others, the Quarkus setting alone causes stealing:
+  (N-1)/N of the connections are on other loops, while the plain pool creates all of them on the busy loop.
 - Throughput hardly changes between 0% and 75% stolen, because the database round trip and the pool size set the limit.
   The cost of stealing is CPU on the event loops and extra latency.
   It shows up only when the database isn't the bottleneck and the event loops are busy.
