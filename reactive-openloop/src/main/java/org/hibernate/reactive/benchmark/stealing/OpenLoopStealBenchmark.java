@@ -44,11 +44,14 @@ public final class OpenLoopStealBenchmark {
 
 	static {
 		DEFAULTS.put( "eventLoops", "4" );
-		// shared or perEventLoop (no stealing, poolSize / eventLoops connections per event loop)
+		// shared, perEventLoop (no stealing, poolSize / eventLoops connections per event loop),
+		// or a StealPolicyPool policy: always, alwaysActive, preferLocalWait, never
 		DEFAULTS.put( "poolType", "shared" );
 		DEFAULTS.put( "poolSize", "16" );
 		// For the shared pool: spread the connections across this many event loops, like Quarkus (0 = plain Vert.x pool)
 		DEFAULTS.put( "poolEventLoopSize", "4" );
+		// How long preferLocalWait waits for a connection of the same event loop
+		DEFAULTS.put( "localWaitMs", "1" );
 		// Total requests per second, for all the event loops
 		DEFAULTS.put( "rate", "2000" );
 		// How the rate is split between the event loops
@@ -73,6 +76,7 @@ public final class OpenLoopStealBenchmark {
 		String poolType = options.get( "poolType" );
 		int poolSize = Integer.parseInt( options.get( "poolSize" ) );
 		int poolEventLoopSize = Integer.parseInt( options.get( "poolEventLoopSize" ) );
+		long localWaitMs = Long.parseLong( options.get( "localWaitMs" ) );
 		double rate = Double.parseDouble( options.get( "rate" ) );
 		double[] weights = Arrays.stream( options.get( "weights" ).split( "," ) ).mapToDouble( Double::parseDouble ).toArray();
 		int queriesPerSession = Integer.parseInt( options.get( "queriesPerSession" ) );
@@ -82,14 +86,14 @@ public final class OpenLoopStealBenchmark {
 		if ( weights.length != eventLoops ) {
 			throw new IllegalArgumentException( "weights needs one value per event loop: " + options.get( "weights" ) );
 		}
-		if ( "perEventLoop".equals( poolType ) ) {
-			// Ignored by PerEventLoopPool, show it in the results
+		if ( !"shared".equals( poolType ) ) {
+			// Only the shared pool uses it, show it in the results
 			options.put( "poolEventLoopSize", "0" );
 			poolEventLoopSize = 0;
 		}
 		System.out.println( "Options: " + options );
 
-		var setup = new ReactiveSetup( eventLoops, poolType, poolSize, poolEventLoopSize );
+		var setup = new ReactiveSetup( eventLoops, poolType, poolSize, poolEventLoopSize, localWaitMs );
 		try {
 			run( setup, options, rate, weights, queriesPerSession, warmupSeconds, durationSeconds, seed );
 		}

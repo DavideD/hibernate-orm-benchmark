@@ -18,7 +18,7 @@ import io.vertx.sqlclient.impl.SocketConnectionBase;
 import io.vertx.sqlclient.impl.SqlConnectionInternal;
 
 /**
- * Access to the Vert.x 4 internals needed by {@link StealCounter} and {@link PerEventLoopPool}.
+ * Access to the Vert.x 4 internals needed by {@link StealCounter}, {@link PerEventLoopPool} and {@link StealPolicyPool}.
  * Vert.x 5 moved these classes, see the copy in {@code src/vertx5/java}.
  */
 final class VertxInternals {
@@ -55,6 +55,13 @@ final class VertxInternals {
 	static EventLoop eventLoopOf(SqlConnection connection) {
 		var socket = (SocketConnectionBase) socketOf( connection );
 		return eventLoopOf( socket.context() );
+	}
+
+	/**
+	 * @return a new context running on the given event loop
+	 */
+	static Context createContext(Vertx vertx, EventLoop eventLoop) {
+		return ( (VertxInternal) vertx ).createEventLoopContext( eventLoop, null, Thread.currentThread().getContextClassLoader() );
 	}
 
 	static List<EventLoop> eventLoops(Vertx vertx) {

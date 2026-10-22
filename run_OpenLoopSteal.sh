@@ -103,11 +103,11 @@ awk '
 	{
 		delete r
 		for ( i = 2; i <= NF; i++ ) { split( $i, kv, "=" ); r[kv[1]] = kv[2] }
-		printf "%6s %-12s %8s %7s%% %7s%% %8s%% %8s %8s %7s %7s %7s %7s\n", r["rate"], r["poolType"], r["achievedRate"], r["stolenPct"],
+		printf "%6s %-16s %8s %7s%% %7s%% %8s%% %8s %8s %7s %7s %7s %7s\n", r["rate"], r["poolType"], r["achievedRate"], r["stolenPct"],
 			r["loopCpuPct"], r["busiestLoopCpuPct"], r["loopCpuUsPerReq"], r["loopSleepsPerReq"], r["p50Us"], r["p99Us"], r["p999Us"], r["failed"]
 	}
 ' "$results" | sort -n -k1,1 -s | {
-	printf "%6s %-12s %8s %8s %8s %9s %8s %8s %7s %7s %7s %7s\n" rate poolType "req/s" stolen "CPU%" "max loop" "CPU us" sleeps "p50 us" "p99 us" "p99.9" failed
+	printf "%6s %-16s %8s %8s %8s %9s %8s %8s %7s %7s %7s %7s\n" rate poolType "req/s" stolen "CPU%" "max loop" "CPU us" sleeps "p50 us" "p99 us" "p99.9" failed
 	cat
 }
 rm -f "$results"

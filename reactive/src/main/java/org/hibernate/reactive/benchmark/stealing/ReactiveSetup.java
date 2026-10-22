@@ -38,17 +38,22 @@ final class ReactiveSetup {
 	final Mutiny.SessionFactory sessionFactory;
 
 	private final String poolType;
+	private final long localWaitMs;
 	private final PgConnectOptions connectOptions;
 	private final PoolOptions poolOptions;
 
 	/**
 	 * @param poolType {@code shared} for one pool for all the event loops (like Quarkus),
-	 * {@code perEventLoop} for one pool per event loop with {@code poolSize / eventLoopCount} connections each
+	 * {@code perEventLoop} for one pool per event loop with {@code poolSize / eventLoopCount} connections each,
+	 * or a {@link StealPolicyPool.Policy} in camel case ({@code always}, {@code alwaysActive}, {@code preferLocalWait},
+	 * {@code never}) for a {@link StealPolicyPool}
 	 * @param poolEventLoopSize when &gt; 0, spreads the connections of the shared pool across the event loops
 	 * like Quarkus does ({@link PoolOptions#setEventLoopSize(int)})
+	 * @param localWaitMs how long {@code preferLocalWait} waits for a connection of the same event loop
 	 */
-	ReactiveSetup(int eventLoopCount, String poolType, int poolSize, int poolEventLoopSize) {
+	ReactiveSetup(int eventLoopCount, String poolType, int poolSize, int poolEventLoopSize, long localWaitMs) {
 		this.poolType = poolType;
+		this.localWaitMs = localWaitMs;
 		vertx = Vertx.vertx( new VertxOptions().setEventLoopPoolSize( eventLoopCount ) );
 
 		connectOptions = new PgConnectOptions()
@@ -106,8 +111,18 @@ final class ReactiveSetup {
 		return switch ( poolType ) {
 			case "shared" -> Pool.pool( vertx, connectOptions, poolOptions );
 			case "perEventLoop" -> PerEventLoopPool.create( vertx, connectOptions, poolOptions );
-			default -> throw new IllegalArgumentException( "Unknown pool type: " + poolType );
+			default -> StealPolicyPool.create( vertx, connectOptions, poolOptions, policy(), localWaitMs );
 		};
+	}
+
+	private StealPolicyPool.Policy policy() {
+		try {
+			return StealPolicyPool.Policy.fromCamelCase( poolType );
+		}
+		catch (IllegalArgumentException e) {
+			throw new IllegalArgumentException( "Unknown pool type: " + poolType
+					+ " (valid: shared, perEventLoop, always, alwaysActive, preferLocalWait, never)", e );
+		}
 	}
 
 	private void populateWorlds() {
