@@ -1,0 +1,17 @@
+plugins {
+    id 'org.hibernate.orm.java-conventions'
+    id 'application'
+}
+
+// Measures the CPU cost of connection stealing at a fixed request rate, see OpenLoopStealBenchmark.
+// The versions come from the reactive module: select them with -Pstack=vertx5 or -Pstack=6.6.
+dependencies {
+    implementation project( ':hibernate-orm-benchmark-reactive' )
+    implementation 'org.hdrhistogram:HdrHistogram:2.2.2'
+}
+
+description = 'hibernate-orm-benchmark-reactive-openloop'
+
+application {
+    mainClass = 'org.hibernate.reactive.benchmark.stealing.OpenLoopStealBenchmark'
+}
