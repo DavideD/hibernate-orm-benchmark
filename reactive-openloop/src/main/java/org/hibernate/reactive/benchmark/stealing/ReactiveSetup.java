@@ -45,6 +45,7 @@ final class ReactiveSetup {
 	/**
 	 * @param poolType {@code shared} for one pool for all the event loops (like Quarkus),
 	 * {@code perEventLoop} for one pool per event loop with {@code poolSize / eventLoopCount} connections each,
+	 * {@code releasesFirst} for a shared pool that processes the releases of connections first ({@link ReleasesFirstExecutor}),
 	 * or a {@link StealPolicyPool.Policy} in camel case ({@code always}, {@code alwaysActive}, {@code preferLocalWait},
 	 * {@code never}) for a {@link StealPolicyPool}
 	 * @param poolEventLoopSize when &gt; 0, spreads the connections of the shared pool across the event loops
@@ -111,6 +112,7 @@ final class ReactiveSetup {
 		return switch ( poolType ) {
 			case "shared" -> Pool.pool( vertx, connectOptions, poolOptions );
 			case "perEventLoop" -> PerEventLoopPool.create( vertx, connectOptions, poolOptions );
+			case "releasesFirst" -> ReleasesFirstExecutor.createPool( vertx, connectOptions, poolOptions );
 			default -> StealPolicyPool.create( vertx, connectOptions, poolOptions, policy(), localWaitMs );
 		};
 	}
@@ -121,7 +123,7 @@ final class ReactiveSetup {
 		}
 		catch (IllegalArgumentException e) {
 			throw new IllegalArgumentException( "Unknown pool type: " + poolType
-					+ " (valid: shared, perEventLoop, always, alwaysActive, preferLocalWait, never)", e );
+					+ " (valid: shared, perEventLoop, releasesFirst, always, alwaysActive, preferLocalWait, never)", e );
 		}
 	}
 
