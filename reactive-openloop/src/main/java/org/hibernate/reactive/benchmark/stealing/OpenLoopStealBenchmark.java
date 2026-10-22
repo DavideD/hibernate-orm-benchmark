@@ -55,7 +55,7 @@ public final class OpenLoopStealBenchmark {
 		// How long preferLocalWait waits for a connection of the same event loop
 		DEFAULTS.put( "localWaitMs", "1" );
 		// localWait: how long a request waits for a connection of its event loop, in microseconds
-		DEFAULTS.put( "localWaitUs", "500" );
+		DEFAULTS.put( "localWaitUs", "1000" );
 		// localWait: skip the wait if the event loop has more than this many local waiters per connection (0 = never skip)
 		DEFAULTS.put( "localWaitDepth", "0" );
 		// localWait: open the new connections on the event loop of the request that needs them
@@ -68,6 +68,9 @@ public final class OpenLoopStealBenchmark {
 		DEFAULTS.put( "warmupSeconds", "10" );
 		DEFAULTS.put( "durationSeconds", "20" );
 		DEFAULTS.put( "seed", "42" );
+		// Use the native epoll transport instead of NIO, if it's on the classpath (-Pepoll). The NIO selector has
+		// a 1 ms resolution: a timer of less than 1 ms fires late when the event loop is sleeping.
+		DEFAULTS.put( "nativeTransport", "false" );
 		// Count the acquisitions that miss a connection of their event loop because its release is still in the
 		// queue of the pool (shared and releasesFirst only, see AffinityProbe). It adds some work to the pool.
 		DEFAULTS.put( "probe", "false" );
@@ -110,8 +113,13 @@ public final class OpenLoopStealBenchmark {
 
 		var localWait = new LocalWaitConfig( Long.parseLong( options.get( "localWaitUs" ) ), Integer.parseInt( options.get( "localWaitDepth" ) ),
 				Boolean.parseBoolean( options.get( "creationAffinity" ) ), new LocalWaitStats() );
-		var setup = new ReactiveSetup( eventLoops, poolType, poolSize, poolEventLoopSize, localWaitMs, localWait );
+		var setup = new ReactiveSetup( eventLoops, poolType, poolSize, poolEventLoopSize, localWaitMs, localWait,
+				Boolean.parseBoolean( options.get( "nativeTransport" ) ) );
 		try {
+			if ( setup.vertx.isNativeTransportEnabled() != Boolean.parseBoolean( options.get( "nativeTransport" ) ) ) {
+				throw new IllegalStateException( "nativeTransport=" + options.get( "nativeTransport" ) + ", but Vert.x uses "
+						+ ( setup.vertx.isNativeTransportEnabled() ? "the native transport" : "NIO (is netty-transport-native-epoll on the classpath? build with -Pepoll)" ) );
+			}
 			AffinityProbe affinityProbe = probe ? AffinityProbe.install( setup.stealCounter.delegate(), setup.vertx ) : null;
 			run( setup, affinityProbe, "localWait".equals( poolType ) ? localWait.stats() : null, options, rate, weights, queriesPerSession, warmupSeconds, durationSeconds, seed );
 		}

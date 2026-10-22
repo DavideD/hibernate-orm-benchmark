@@ -55,12 +55,14 @@ final class ReactiveSetup {
 	 * @param localWaitMs how long {@code preferLocalWait} waits for a connection of the same event loop
 	 * @param localWait the settings of {@code localWait}, a shared pool that waits for a connection of the same
 	 * event loop ({@code LocalWaitPool})
+	 * @param nativeTransport use the native epoll transport instead of NIO, if it's on the classpath ({@code -Pepoll})
 	 */
-	ReactiveSetup(int eventLoopCount, String poolType, int poolSize, int poolEventLoopSize, long localWaitMs, LocalWaitConfig localWait) {
+	ReactiveSetup(int eventLoopCount, String poolType, int poolSize, int poolEventLoopSize, long localWaitMs, LocalWaitConfig localWait,
+			boolean nativeTransport) {
 		this.poolType = poolType;
 		this.localWaitMs = localWaitMs;
 		this.localWait = localWait;
-		vertx = Vertx.vertx( new VertxOptions().setEventLoopPoolSize( eventLoopCount ) );
+		vertx = Vertx.vertx( new VertxOptions().setEventLoopPoolSize( eventLoopCount ).setPreferNativeTransport( nativeTransport ) );
 
 		connectOptions = new PgConnectOptions()
 				.setHost( "localhost" )

@@ -12,7 +12,8 @@
 #
 # Options and defaults: eventLoops=4 poolSize=16 poolEventLoopSize=4 weights=1,1,1,1 queriesPerSession=5
 #                       warmupSeconds=10 durationSeconds=20 seed=42
-#                       localWaitMs=1 (preferLocalWait) localWaitUs=500 localWaitDepth=0 creationAffinity=true (localWait)
+#                       localWaitMs=1 (preferLocalWait) localWaitUs=1000 localWaitDepth=0 creationAffinity=true (localWait)
+#                       nativeTransport=false (true needs EPOLL)
 #
 # Environment variables:
 #   RATES         Total requests per second to test (default: "1000 2000 4000")
@@ -22,13 +23,14 @@
 #   JAVA_HOME     JDK used for Gradle and the benchmark (default: a JDK 21 in /usr/lib/jvm, Gradle 8.4 can't run on 25)
 #   PODMAN        Container command (default: podman, or "sudo podman" if rootless podman doesn't work)
 #   STACK         Versions to build with: vertx5 or 6.6 (default: ORM 7.4 + HR 3.4 + Vert.x 4.5)
+#   EPOLL         Netty version of the native epoll transport to use instead of NIO, e.g. 4.2.19.Final (Vert.x 5)
 #   SKIP_BUILD    Set to true to reuse the previous build
 #   STOP_DB       Set to true to stop the database when the benchmark ends
 
 set -e
 
 if [[ "$1" == "-h" || "$1" == "--help" ]]; then
-	sed -n '3,26p' "$0" | sed 's/^# \{0,1\}//'
+	sed -n '3,28p' "$0" | sed 's/^# \{0,1\}//'
 	exit 0
 fi
 
@@ -80,7 +82,7 @@ fi
 if [ "$SKIP_BUILD" == "true" ] && [ -x "$BIN" ]; then
 	echo "Skipping build, using $BIN"
 else
-	./gradlew :hibernate-orm-benchmark-reactive-openloop:installDist ${STACK:+-Pstack=$STACK}
+	./gradlew :hibernate-orm-benchmark-reactive-openloop:installDist ${STACK:+-Pstack=$STACK} ${EPOLL:+-Pepoll=$EPOLL}
 fi
 
 # --- Benchmark ---

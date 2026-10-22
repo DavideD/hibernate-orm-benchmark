@@ -35,6 +35,12 @@ dependencies {
     }
     runtimeOnly 'com.ongres.scram:scram-client:3.2'
 
+    // -Pepoll=<Netty version>: use the native epoll transport (Vert.x does when it's on the classpath).
+    // The default NIO selector has a 1 ms resolution, so a sleeping event loop is woken up late by a timer of less than 1 ms.
+    if ( project.findProperty("epoll") ) {
+        runtimeOnly "io.netty:netty-transport-native-epoll:${project.findProperty("epoll")}:linux-x86_64"
+    }
+
     // HDR Histogram for latency measurements
     implementation 'org.hdrhistogram:HdrHistogram:2.2.2'
 
