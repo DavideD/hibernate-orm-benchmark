@@ -60,6 +60,15 @@ public class ReactivePoolStealBenchmark {
 	@Param({"-1"})
 	int targetVerticle;
 
+	@Param({"2"})
+	int poolSize;
+
+	// When > 0, mimics Quarkus: PoolOptions#setEventLoopSize spreads connections across event loops
+	@Param({"0"})
+	int poolEventLoopSize;
+
+	private final StealCounter stealCounter = new StealCounter();
+
 	private Mutiny.SessionFactory sessionFactory;
 	private Vertx vertx;
 	private Pool sharedPool;
@@ -78,8 +87,8 @@ public class ReactivePoolStealBenchmark {
 				.setUser( "hibernate_orm_test" )
 				.setPassword( "hibernate_orm_test" )
 				.setCachePreparedStatements( false );
-		var poolOptions = new PoolOptions().setMaxSize( 2 );
-		sharedPool = Pool.pool( vertx, connectOptions, poolOptions );
+		var poolOptions = new PoolOptions().setMaxSize( poolSize ).setEventLoopSize( poolEventLoopSize );
+		sharedPool = stealCounter.wrap( Pool.pool( vertx, connectOptions, poolOptions ) );
 
 		var config = new Configuration();
 		config.addAnnotatedClass( World.class );
@@ -137,6 +146,16 @@ public class ReactivePoolStealBenchmark {
 					.toCompletionStage().toCompletableFuture().join();
 			deploymentIds.add( id );
 		}
+	}
+
+	@Setup(Level.Iteration)
+	public void resetStealCounter() {
+		stealCounter.reset();
+	}
+
+	@TearDown(Level.Iteration)
+	public void reportStealCounter() {
+		System.out.println( "\n=== Steal: " + stealCounter.report() );
 	}
 
 	@TearDown(Level.Trial)
@@ -293,6 +312,7 @@ public class ReactivePoolStealBenchmark {
 		var bench = new ReactivePoolStealBenchmark();
 		bench.eventLoopCount = 2;
 		bench.sleepMs = 0;
+		bench.poolSize = 2;
 		bench.setup();
 
 		try {
