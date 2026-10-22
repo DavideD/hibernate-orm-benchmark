@@ -113,7 +113,9 @@ the same kind of handoff a steal adds, and the database round trip set the throu
 - `always`, `alwaysActive`, `preferLocalWait`, `never`: the steal policies of section 9.
 
 Run it with `./run_OpenLoopSteal.sh` (see `--help`). It runs every request rate and pool type in its own JVM,
-then prints a summary table. `STACK=vertx5` builds it with Vert.x 5, `STACK=6.6` with ORM 6.6 and Hibernate Reactive 2.4:
+then prints a summary table. By default it uses Hibernate Reactive 3.4.6, Vert.x 4.5.35 and ORM 7.4.13.
+`STACK=vertx5` uses Hibernate Reactive 4.5.11, Vert.x 5.1.10 and ORM 7.4.13 (section 11),
+`STACK=6.6` uses Hibernate Reactive 2.4.19, Vert.x 4.5.27 and ORM 6.6.50:
 
 ```
 ./run_OpenLoopSteal.sh poolSize=4
@@ -125,6 +127,10 @@ The setup (dialect detection, schema creation, test data) runs on the main threa
 and Vert.x gives that thread a context on an event loop that isn't the verticles' one.
 The connections it opens would stay in the pool and count as steals,
 so the benchmark replaces the pool with a fresh one before starting the verticles.
+
+Sections 7 to 10 were measured with Hibernate Reactive 3.4.0, Vert.x 4.5.27 and ORM 7.4.0.
+The current versions gave the same results: 3 runs of each, alternating the versions,
+at 4000 requests/s with 1 connection per event loop, used the same CPU per request (within 3%) and stole as much.
 
 ## 7. When connections are stolen
 
@@ -331,33 +337,35 @@ What the numbers show:
 
 ## 11. Vert.x 5
 
-The same runs with Vert.x 5.0 and Hibernate Reactive 4.4 (`STACK=vertx5`), one 20 s run for each line,
-give the same results. Every request costs more CPU than with Vert.x 4.5, with or without stealing.
+The same runs with Vert.x 5.1.10, Hibernate Reactive 4.5.11 and ORM 7.4.13 (`STACK=vertx5`),
+one 20 s run for each line, give the same results.
+Every request costs more CPU than with Vert.x 4.5, with or without stealing.
 
 **1 connection per event loop (`poolSize=4`), same load on every event loop:**
 
 | Requests/s | Pool | Stolen | CPU per request | Sleeps per request | p50 | p99 |
 |---|---|---|---|---|---|---|
-| 2000 | `shared` | 31% | 220 µs | 11.9 | 1.01 ms | 1.8 ms |
-| 2000 | `perEventLoop` | 0% | 194 µs | 10.1 | 1.05 ms | 1.9 ms |
-| 2000 | `always` | 32% | 230 µs | 11.9 | 1.01 ms | 1.8 ms |
-| 2000 | `alwaysActive` | 28% | 223 µs | 11.7 | 1.03 ms | 1.9 ms |
-| 2000 | `preferLocalWait` | 0.3% | 204 µs | 10.0 | 1.06 ms | 1.9 ms |
-| 2000 | `never` | 0% | 202 µs | 10.1 | 1.06 ms | 1.9 ms |
-| 4000 | `shared` | 53% | 293 µs | 10.7 | 1.04 ms | 1.9 ms |
-| 4000 | `perEventLoop` | 0% | 227 µs | 8.5 | 1.15 ms | 2.1 ms |
-| 4000 | `always` | 54% | 299 µs | 10.7 | 1.05 ms | 2.0 ms |
-| 4000 | `alwaysActive` | 38% | 267 µs | 10.0 | 1.09 ms | 2.1 ms |
-| 4000 | `preferLocalWait` | 1.9% | 238 µs | 8.3 | 1.16 ms | 2.1 ms |
-| 4000 | `never` | 0% | 229 µs | 8.4 | 1.15 ms | 2.1 ms |
+| 2000 | `shared` | 32% | 234 µs | 11.8 | 1.02 ms | 2.0 ms |
+| 2000 | `perEventLoop` | 0% | 201 µs | 10.0 | 1.08 ms | 2.0 ms |
+| 2000 | `always` | 32% | 232 µs | 11.9 | 1.02 ms | 1.9 ms |
+| 2000 | `alwaysActive` | 28% | 216 µs | 11.7 | 1.02 ms | 1.9 ms |
+| 2000 | `preferLocalWait` | 0.3% | 204 µs | 10.0 | 1.07 ms | 1.9 ms |
+| 2000 | `never` | 0% | 203 µs | 10.1 | 1.06 ms | 1.9 ms |
+| 4000 | `shared` | 53% | 300 µs | 10.6 | 1.05 ms | 2.0 ms |
+| 4000 | `perEventLoop` | 0% | 230 µs | 8.4 | 1.16 ms | 2.2 ms |
+| 4000 | `always` | 54% | 303 µs | 10.7 | 1.06 ms | 2.0 ms |
+| 4000 | `alwaysActive` | 37% | 279 µs | 10.0 | 1.11 ms | 2.3 ms |
+| 4000 | `preferLocalWait` | 2.1% | 240 µs | 8.3 | 1.17 ms | 2.1 ms |
+| 4000 | `never` | 0% | 233 µs | 8.3 | 1.17 ms | 2.2 ms |
 
-- Stealing costs about as much, relatively: 14% more CPU per request at 2000 requests/s, 29% at 4000
-  (Vert.x 4.5: 18% and 32%, section 8). In absolute terms it's more: 66 µs per request at 4000 requests/s
+- Stealing costs about as much, relatively: 16% more CPU per request at 2000 requests/s, 30% at 4000
+  (Vert.x 4.5: 18% and 32%, section 8). In absolute terms it's more: 70 µs per request at 4000 requests/s
   instead of 40 µs.
 - The policies compare like with Vert.x 4.5 (section 9).
 - The latency is about the same with and without stealing; the median is up to 0.1 ms lower with stealing.
 - The probe (section 10) counted no missed acquisitions either (< 0.05%), at 4000 and 8000 requests/s.
-  A connection of the same event loop got free 309–357 µs later (median).
+  A connection of the same event loop got free 298–358 µs later (median).
 - With 8 connections: with the same load everywhere, the plain pool stole 53% and the Quarkus-like pool 19%
   at 4000 requests/s. With all the requests on one event loop, at 2000 requests/s,
   the plain pool stole nothing and the Quarkus-like pool 37% (section 7).
+- Vert.x 5.0.12 with Hibernate Reactive 4.4.0 gave the same results, within a few percent.
