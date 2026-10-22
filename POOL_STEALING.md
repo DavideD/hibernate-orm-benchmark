@@ -82,94 +82,94 @@ The options on the table:
 - **One pool per event loop**
   (tsegismont's `PerEventLoopPool` in [DavideD/FrameworkBenchmarks#1](https://github.com/DavideD/FrameworkBenchmarks/pull/1)).
   There's never a steal, but the connections are split up: a busy loop can't borrow idle connections from quiet ones.
-  The benchmark can run with it, see `poolType` below.
+  The benchmark can run with it, see `poolType` in section 6.
 
-## 6. What this means for the benchmark
-
-`ReactivePoolStealBenchmark` counts stolen connections (`StealCounter`) and prints, after each iteration,
-the ratio and how many connections and requests each event loop has.
-Run it with `./run_PoolStealCounter.sh` (see `--help` for the options, `STACK=vertx5` builds with Vert.x 5).
-
-The `poolType` parameter selects the pool:
-
-- `shared` (default): one Vert.x pool for all the event loops, like Quarkus.
-  Add `-p poolEventLoopSize=N` to spread its connections across the loops like Quarkus does.
-- `perEventLoop`: one pool per event loop, each with `poolSize / eventLoopCount` connections (`PerEventLoopPool`).
-  A port of tsegismont's pool that works with Vert.x 4 and 5. It ignores `poolEventLoopSize`,
-  and `poolSize` must be at least `eventLoopCount`.
-
-For example, to compare the three setups with all the requests on one event loop:
-
-```
-./run_PoolStealCounter.sh -p poolType=shared -p poolEventLoopSize=0,4
-./run_PoolStealCounter.sh -p poolType=perEventLoop -p poolEventLoopSize=0
-```
-
-The setup (dialect detection, schema creation, test data) runs on the JMH thread,
-and Vert.x gives that thread a context on an event loop that isn't the verticles' one.
-The connections it opens stay in the pool, so the benchmark replaces the pool with a fresh one before deploying the verticles.
-Without this, all the connections opened during the setup count as steals:
-it's what made the plain pool look like it stole 25% of the connections in the third scenario below.
-
-Results from short runs (one fork, 5 s measurement, `sleepMs=1` unless noted):
-
-| Scenario | Stolen | ops/s |
-|---|---|---|
-| 2 threads, pool 2, 2 loops (original setup) | 0% | 906 |
-| Same, with `poolEventLoopSize=2` (Quarkus-like) | 0% | 905 |
-| 16 threads, pool 2, 2 loops (pool full) | 49.6% | 919 |
-| Same, with `poolEventLoopSize=2` | 50.0% | 916 |
-| All requests on loop 0, pool 8, 4 loops, 8 threads, plain pool | 0% | 3,738 |
-| Same, with `poolEventLoopSize=4` | 74.9% | 3,703 |
-| `sleepMs=0`, requests spread evenly, pool 8, 4 loops, 8 threads | 0% | ~63k |
-| Same, with `poolEventLoopSize=4` | 0% | ~63k |
-| 16 threads, pool 2, 2 loops, `poolType=perEventLoop` | 0% | 918 |
-| All requests on loop 0, pool 8, 4 loops, 8 threads, `poolType=perEventLoop` | 0% | 916 |
-| `sleepMs=0`, requests spread evenly, pool 8, 4 loops, 8 threads, `poolType=perEventLoop` | 0% | ~65k |
-
-Vert.x 5 (`STACK=vertx5`) gives the same ratios.
-
-What the numbers show:
-
-- When the requests are spread evenly and there's a free connection, nothing is stolen, with or without the Quarkus setting.
-- A full pool causes stealing: the wait queue hands connections out in arrival order, whatever the loop.
-- When one loop is busier than the others, the Quarkus setting alone causes stealing:
-  (N-1)/N of the connections are on other loops, while the plain pool creates all of them on the busy loop.
-- One pool per event loop never steals, and costs nothing when the load is even.
-  When one loop does all the work, it only has its share of the connections (2 out of 8 here)
-  and throughput drops to a quarter of the shared pool's.
-- Throughput hardly changes between 0% and 75% stolen, because the database round trip and the pool size set the limit.
-  The cost of stealing is CPU: wake-ups and context switches on both event loops, for every query of the session.
-  It's highest when the event loops are lightly loaded and go to sleep between events,
-  and it doesn't show up in throughput until the CPU runs out.
-  To see it, measure the CPU per request at a fixed request rate, not the maximum throughput (see section 7).
-
-This benchmark can't show the cost of stealing: it measures the maximum throughput,
-and every operation already goes from a JMH thread to an event loop and back, the same kind of handoff a steal adds.
-Section 7 measures it with a different benchmark.
-
-## 7. Measuring the CPU cost of stealing
+## 6. The benchmark
 
 The `reactive-openloop` module (`OpenLoopStealBenchmark`) runs the requests at a fixed rate,
-well below the maximum throughput, so that the event loops go to sleep between events.
+below the maximum throughput, so that the event loops go to sleep between events, like in most applications.
 Each event loop runs a `LoadVerticle` that starts the requests itself, at random intervals (Poisson arrivals),
 so no other thread is involved. Each request opens a session and runs 5 `find`s.
 
-For the event loop threads only, it measures:
+It measures:
 
-- **CPU per request** (`ThreadMXBean`).
-- **Sleeps per request:** the voluntary context switches, from `/proc/thread-self/status`.
+- **Stolen connections** (`StealCounter`), and how many connections and requests each event loop has.
+- **CPU per request** of the event loop threads (`ThreadMXBean`).
+- **Sleeps per request** of the event loop threads: the voluntary context switches, from `/proc/thread-self/status`.
   Each time an event loop goes to sleep, something has to wake it up again. Linux only.
 - **Latency,** from the time each request was scheduled to start, so a request that starts late counts as slow.
 
-It compares the shared pool with `poolEventLoopSize` equal to the number of event loops (like Quarkus),
-which steals, with `PerEventLoopPool`, which can't steal, at the same request rate.
-Run it with `./run_OpenLoopSteal.sh` (see `--help`):
+An earlier JMH benchmark started the requests from JMH threads and measured the maximum throughput.
+It couldn't show the cost of stealing: every request already went from a JMH thread to an event loop and back,
+the same kind of handoff a steal adds, and the database round trip set the throughput.
+
+`poolType` selects the pool:
+
+- `shared` (default): one Vert.x pool for all the event loops.
+  `poolEventLoopSize=N` spreads its connections across N event loops like Quarkus does (the default, 4),
+  `poolEventLoopSize=0` is a plain Vert.x pool: it opens each connection on the event loop that asks for it.
+- `perEventLoop`: one pool per event loop, each with `poolSize / eventLoops` connections (`PerEventLoopPool`).
+  A port of tsegismont's pool that works with Vert.x 4 and 5. It never steals.
+- `always`, `alwaysActive`, `preferLocalWait`, `never`: the steal policies of section 9.
+
+Run it with `./run_OpenLoopSteal.sh` (see `--help`). It runs every request rate and pool type in its own JVM,
+then prints a summary table. `STACK=vertx5` builds it with Vert.x 5, `STACK=6.6` with ORM 6.6 and Hibernate Reactive 2.4:
 
 ```
 ./run_OpenLoopSteal.sh poolSize=4
-RATES="2000 4000" REPEAT=3 ./run_OpenLoopSteal.sh poolSize=8 weights=4,2,1,1
+RATES="2000 4000" REPEAT=3 POOL_TYPES="shared perEventLoop" ./run_OpenLoopSteal.sh poolSize=8 weights=4,2,1,1
+STACK=vertx5 ./run_OpenLoopSteal.sh poolSize=4
 ```
+
+The setup (dialect detection, schema creation, test data) runs on the main thread,
+and Vert.x gives that thread a context on an event loop that isn't the verticles' one.
+The connections it opens would stay in the pool and count as steals,
+so the benchmark replaces the pool with a fresh one before starting the verticles.
+
+## 7. When connections are stolen
+
+4 event loops, one 20 s run for each line, Vert.x 4.5.
+
+**8 connections, same load on every event loop:**
+
+| Requests/s | Pool | Stolen | CPU per request | p50 | p99 |
+|---|---|---|---|---|---|
+| 2000 | plain (`poolEventLoopSize=0`) | 51% | 142 µs | 1.06 ms | 2.1 ms |
+| 2000 | Quarkus-like (`poolEventLoopSize=4`) | 6% | 123 µs | 1.02 ms | 1.9 ms |
+| 4000 | plain | 45% | 133 µs | 1.18 ms | 2.2 ms |
+| 4000 | Quarkus-like | 23% | 131 µs | 1.15 ms | 2.2 ms |
+
+**8 connections, all the requests on one event loop (`weights=1,0,0,0`):**
+
+| Requests/s | Pool | Stolen | CPU per request | Sleeps per request | p50 | p99 |
+|---|---|---|---|---|---|---|
+| 1000 | plain | 0% | 100 µs | 6.7 | 1.06 ms | 1.9 ms |
+| 1000 | Quarkus-like | 17% | 121 µs | 9.9 | 1.08 ms | 2.0 ms |
+| 1000 | per event loop | 0% | 103 µs | 8.4 | 1.09 ms | 2.1 ms |
+| 2000 | plain | 0% | 90 µs | 3.2 | 1.18 ms | 2.2 ms |
+| 2000 | Quarkus-like | 42% | 132 µs | 10.5 | 1.18 ms | 2.1 ms |
+| 2000 | per event loop | 0% | 101 µs | 7.2 | 1.32 ms | 2.4 ms |
+
+With 1 connection per event loop (`poolSize=4`), the Quarkus-like pool steals 15% to 63% of the connections
+between 1000 and 4000 requests/s (section 8).
+
+What the numbers show:
+
+- **A plain Vert.x pool shared by all the event loops keeps the connections where they were first opened.**
+  With the same load everywhere, it stole half of the connections: all 8 were on 2 of the 4 event loops.
+  The first verticles to start opened them all, and the pool never moves them.
+  Spreading the connections across the event loops (`PoolOptions#setEventLoopSize`, what Quarkus does) avoids this.
+- **The Quarkus-like pool steals when an event loop has no free connection of its own:**
+  the pool is full, or the requests arrive in bursts, or one event loop has more requests than the others.
+  With all the requests on one event loop, (N-1)/N of its connections are on other event loops.
+- **One pool per event loop never steals,** but an event loop can only use its share of the connections.
+  With all the requests on one event loop it has 2 connections instead of 8: at 2000 requests/s,
+  the median latency goes up by 0.14 ms. With more load it would wait longer for a connection.
+- **A busy event loop that doesn't steal uses the least CPU:** with all the requests and connections on one event loop,
+  it sleeps half as often at 2000 requests/s as at 1000. A busy event loop is often awake already,
+  so there's less to wake up.
+
+## 8. The CPU cost of stealing
 
 Results: 4 event loops, 10 s warm-up, 20 s measurement, 3 runs for each line (averages, the runs were within about 3% of each other).
 Event loop CPU is per request; "busiest loop" is the CPU of the busiest event loop (100% = one core).
@@ -208,12 +208,12 @@ What the numbers show:
   so they don't show whether stealing gets cheaper when the event loops are busy.
 - Without stealing, the busiest event loop does all its own work: with uneven load it uses more CPU (23% instead of 19%),
   and it only has its share of the connections. With more uneven load than this, or fewer connections,
-  its requests would wait for a connection and the latency would go up (see section 6).
+  its requests would wait for a connection and the latency would go up (see section 7).
 - With enough connections that nothing is stolen (`poolSize=16`, same load everywhere, 2000 requests/s, 0.1% stolen),
   both pools used about the same CPU per request (115 µs shared, 118 µs per event loop, one 10 s run).
   The difference comes from stealing, not from the pool implementation.
 
-## 8. Steal policies
+## 9. Steal policies
 
 `StealPolicyPool` is a prototype of the options proposed to control stealing.
 With no free connection on the request's event loop:
@@ -236,8 +236,8 @@ same steal ratio, same CPU per request within the noise.
 POOL_TYPES="shared always alwaysActive preferLocalWait never" ./run_OpenLoopSteal.sh poolSize=4
 ```
 
-Results with the setups of section 7, 2 runs for each line (ranges show both runs).
-These runs were noisier than the ones in section 7: two runs of the same line differ by up to 20%.
+Results with the setups of section 8, 2 runs for each line (ranges show both runs).
+These runs were noisier than the ones in section 8: two runs of the same line differ by up to 20%.
 
 **1 connection per event loop (`poolSize=4`), same load on every event loop:**
 
@@ -280,10 +280,10 @@ What the numbers show:
 - Without stealing, the busiest event loop does more of its own work (23% of a core instead of 18–19%).
   With more uneven load or fewer connections, its requests would wait for a connection: the timeout of
   `preferLocalWait` is what limits that wait.
-- `never` is about 5 µs per request slower than `PerEventLoopPool` (section 7), likely the cost of wrapping
+- `never` is about 5 µs per request slower than `PerEventLoopPool` (section 8), likely the cost of wrapping
   the connections, which all the `StealPolicyPool` policies pay.
 
-## 9. Releases still in the queue of the pool
+## 10. Releases still in the queue of the pool
 
 The Vert.x pool (`SimpleConnectionPool`) processes all its actions (acquire, release, ...) from a single queue,
 in the order they're submitted (`CombinerExecutor`). So an acquisition can find no free connection on its event loop,
@@ -323,8 +323,41 @@ What the numbers show:
 - In these workloads, an acquisition almost never misses a release that's already in the queue.
   Processing the pending releases first wouldn't change how often connections are stolen.
 - The local connection usually gets free 0.3–0.5 ms later: it's still in use, running the rest of its session.
-  That's why `preferLocalWait` with 1 ms (section 8) avoids almost all the steals: it waits for these connections.
+  That's why `preferLocalWait` with 1 ms (section 9) avoids almost all the steals: it waits for these connections.
 - This could be different with other workloads, for example very short sessions or many more event loops,
   where releases and acquisitions happen closer together. The probe can check that.
 - The probe adds some work to every action of the pool (about 3% more CPU per request here),
   so it's off by default. Only tested with Vert.x 4.5.
+
+## 11. Vert.x 5
+
+The same runs with Vert.x 5.0 and Hibernate Reactive 4.4 (`STACK=vertx5`), one 20 s run for each line,
+give the same results. Every request costs more CPU than with Vert.x 4.5, with or without stealing.
+
+**1 connection per event loop (`poolSize=4`), same load on every event loop:**
+
+| Requests/s | Pool | Stolen | CPU per request | Sleeps per request | p50 | p99 |
+|---|---|---|---|---|---|---|
+| 2000 | `shared` | 31% | 220 µs | 11.9 | 1.01 ms | 1.8 ms |
+| 2000 | `perEventLoop` | 0% | 194 µs | 10.1 | 1.05 ms | 1.9 ms |
+| 2000 | `always` | 32% | 230 µs | 11.9 | 1.01 ms | 1.8 ms |
+| 2000 | `alwaysActive` | 28% | 223 µs | 11.7 | 1.03 ms | 1.9 ms |
+| 2000 | `preferLocalWait` | 0.3% | 204 µs | 10.0 | 1.06 ms | 1.9 ms |
+| 2000 | `never` | 0% | 202 µs | 10.1 | 1.06 ms | 1.9 ms |
+| 4000 | `shared` | 53% | 293 µs | 10.7 | 1.04 ms | 1.9 ms |
+| 4000 | `perEventLoop` | 0% | 227 µs | 8.5 | 1.15 ms | 2.1 ms |
+| 4000 | `always` | 54% | 299 µs | 10.7 | 1.05 ms | 2.0 ms |
+| 4000 | `alwaysActive` | 38% | 267 µs | 10.0 | 1.09 ms | 2.1 ms |
+| 4000 | `preferLocalWait` | 1.9% | 238 µs | 8.3 | 1.16 ms | 2.1 ms |
+| 4000 | `never` | 0% | 229 µs | 8.4 | 1.15 ms | 2.1 ms |
+
+- Stealing costs about as much, relatively: 14% more CPU per request at 2000 requests/s, 29% at 4000
+  (Vert.x 4.5: 18% and 32%, section 8). In absolute terms it's more: 66 µs per request at 4000 requests/s
+  instead of 40 µs.
+- The policies compare like with Vert.x 4.5 (section 9).
+- The latency is about the same with and without stealing; the median is up to 0.1 ms lower with stealing.
+- The probe (section 10) counted no missed acquisitions either (< 0.05%), at 4000 and 8000 requests/s.
+  A connection of the same event loop got free 309–357 µs later (median).
+- With 8 connections: with the same load everywhere, the plain pool stole 53% and the Quarkus-like pool 19%
+  at 4000 requests/s. With all the requests on one event loop, at 2000 requests/s,
+  the plain pool stole nothing and the Quarkus-like pool 37% (section 7).
