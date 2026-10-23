@@ -51,8 +51,10 @@ final class ReactiveSetup {
 	 * @param poolEventLoopSize when &gt; 0, spreads the connections of the shared pool across the event loops
 	 * like Quarkus does ({@link PoolOptions#setEventLoopSize(int)})
 	 * @param localWaitMs how long {@code preferLocalWait} waits for a connection of the same event loop
+	 * @param cachePreparedStatements whether the Vert.x PostgreSQL client caches the prepared statements
 	 */
-	ReactiveSetup(int eventLoopCount, String poolType, int poolSize, int poolEventLoopSize, long localWaitMs) {
+	ReactiveSetup(int eventLoopCount, String poolType, int poolSize, int poolEventLoopSize, long localWaitMs,
+			boolean cachePreparedStatements) {
 		this.poolType = poolType;
 		this.localWaitMs = localWaitMs;
 		vertx = Vertx.vertx( new VertxOptions().setEventLoopPoolSize( eventLoopCount ) );
@@ -63,7 +65,7 @@ final class ReactiveSetup {
 				.setDatabase( "hibernate_orm_test" )
 				.setUser( "hibernate_orm_test" )
 				.setPassword( "hibernate_orm_test" )
-				.setCachePreparedStatements( false );
+				.setCachePreparedStatements( cachePreparedStatements );
 		poolOptions = new PoolOptions().setMaxSize( poolSize ).setEventLoopSize( poolEventLoopSize );
 		stealCounter = new StealCounter( vertx );
 		pool = stealCounter.wrap( createPool() );
