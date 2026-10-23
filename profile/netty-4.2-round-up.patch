@@ -1,0 +1,13 @@
+diff --git a/transport/src/main/java/io/netty/channel/nio/NioIoHandler.java b/transport/src/main/java/io/netty/channel/nio/NioIoHandler.java
+index 0f02ecb..e6939a2 100644
+--- a/transport/src/main/java/io/netty/channel/nio/NioIoHandler.java
++++ b/transport/src/main/java/io/netty/channel/nio/NioIoHandler.java
+@@ -730,7 +730,7 @@ public final class NioIoHandler implements IoHandler {
+             return Long.MAX_VALUE / 1_000_000L;
+         }
+         // Add 500_000 to round up to the nearest millisecond.
+-        return (nanosBeforeDeadline + 500_000L) / 1_000_000L;
++        return (nanosBeforeDeadline + 995_000L) / 1_000_000L;
+     }
+ 
+     int selectNow() throws IOException {
