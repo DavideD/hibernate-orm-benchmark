@@ -315,9 +315,9 @@ instead of `500_000L`. I compiled that class from the Netty 4.2.19 sources and p
 - Cost: timers can fire up to 1 ms late, like with Netty 4.1 and Vert.x 4.5. The median latency of the benchmark goes up by 0.3 ms
   (1449 µs → 1727 µs, `v4`: 1749 µs), which is the timer delay.
 
-It is not a fix I'm proposing for Netty as is: Netty 4.2 may have changed the rounding on purpose
-(more precise timers), and I haven't looked for the commit or an issue. An issue search in `netty/netty` found nothing.
-A better fix could still sleep, but with a sub-millisecond timeout, or spin for a bounded time only.
+The real fix, with tests, is a branch of Netty 4.2 (`~/netty`, `fix-nio-select-timeout-rounding`), see `NETTY_SELECT_ROUNDING.md`.
+The `500_000L` was not a deliberate precision change: Netty 4.1 had it too until #9799 (2019) replaced it with `995000L`,
+and the 4.2 `NioIoHandler` (#13991, 2024) was written with the old code.
 
 Workarounds for applications:
 
@@ -348,94 +348,18 @@ Vert.x 5 allocates a little more (a `DirectByteBuffer` per read, the 5.x command
   (`seccomp_run_filters` is 1% of the time). On bare metal the spin costs less per iteration, but 8 times more `epoll_wait` is 8 times more.
 - 4000 requests/s on 4 loops is 17% busy per loop. A busier loop spins less (it is less often idle with a timer pending)
   and a quieter one is not affected as much. I didn't measure other rates here.
-- I didn't find the Netty commit that changed the rounding, and I didn't check Netty `main` or a newer 4.2.x than 4.2.19.
-- I patched a copy of `NioIoHandler` on the class path. I did not build Netty.
+- The numbers in this document use a patched copy of `NioIoHandler` on the class path. The real fix was built later
+  and measured in `NETTY_SELECT_ROUNDING.md`.
 - The residual `shared` difference (section 5) is not explained.
 - The benchmark latencies include the delay of the timers that start the requests, so the latency comparison has the 0.3 ms
   rounding difference in it.
 - mcp-jafar was used for cross-checks, not for the tables. Its `jfr_query` language rejected my `groupBy` on stack frames
   (the `[0]` index in a predicate), so the per frame aggregation is done on collapsed stacks.
 
-## 11. Draft of the Vert.x issue
+## 11. The Vert.x issue
 
-> Not filed. Needs a check of the numbers on another machine, and probably a Netty issue as well
-> (`profile/NettyTimerSpin.java` is the Netty-only reproducer).
-
-**Title:** Vert.x 5 (Netty 4.2): event loops poll the selector in a loop before every timer, 2–3 times the CPU of Vert.x 4.5
-
-**Versions:** Vert.x 5.1.10 and 5.2.2, Netty 4.2.19.Final, OpenJDK 25, Linux x86_64, NIO transport (default).
-Compared with Vert.x 4.5.35 and Netty 4.1.139.Final.
-
-**Description**
-
-With the same application, the event loop threads use 2–3 times more CPU per request on Vert.x 5 than on Vert.x 4.5.
-We found it with Hibernate Reactive on the Vert.x PostgreSQL client (297 µs against 102 µs of event loop CPU per request of 5 `find`s,
-4000 requests/s, 4 event loops, 4 connections), then reproduced it with a Vert.x PostgreSQL pool alone.
-
-An async-profiler profile (`event=cpu-clock`) shows that all the extra CPU is the selector being polled:
-`NioIoHandler.select` -> `SelectorImpl.selectNow` -> `epoll_wait`, plus `clock_gettime`.
-The event loop calls `epoll_wait` 79 times per request on Vert.x 5 and 10 times on Vert.x 4.5; reads and writes are the same (10 each).
-
-**Cause (as far as we can tell)**
-
-`NioIoHandler.millisBeforeDeadline` (Netty 4.2) computes `(nanosBeforeDeadline + 500_000L) / 1_000_000L`, which rounds to the nearest millisecond.
-If the next scheduled task (any Vert.x timer) is less than 0.5 ms away, `select` calls `selectNow()` instead of sleeping and returns.
-The task is not due yet, so the loop comes back and does it again until the deadline.
-Netty 4.1 (`NioEventLoop.select`) adds `995000L`, rounding up, and sleeps in `epoll_wait`.
-Changing `500_000L` to `995_000L` in a copy of `NioIoHandler` brings Vert.x 5.1.10 to the Vert.x 4.5 CPU in both reproducers.
-
-**Reproducer (Vert.x only, no Hibernate)**
-
-`VertxCpuRepro.java` (attached; `./gradlew :hibernate-orm-benchmark-vertx-repro:installDist [-Pstack=vertx5]`, PostgreSQL on localhost:5432).
-4 event loops, one verticle on each starts requests with Poisson arrivals from `vertx.setTimer`, at 4000 requests/s in total.
-A request takes a connection from a `Pool`, runs 5 prepared queries on it, closes it.
-It prints the CPU time of the event loop threads per completed request.
-
-```
-Vert.x 4.5.35  poolType=perEventLoop: 82 µs per request    (cachePreparedStatements=true: 41 µs)
-Vert.x 5.1.10  poolType=perEventLoop: 261 µs per request   (cachePreparedStatements=true: 87 µs)
-Vert.x 5.2.2   poolType=perEventLoop: 264 µs per request   (cachePreparedStatements=true: 88 µs)
-Vert.x 5.1.10 with generator=thread (no Vert.x timer): 90 µs per request
-Vert.x 5.1.10 with nativeTransport=true (netty-transport-native-epoll): 83 µs per request
-```
-
-Netty only (`NettyTimerSpin.java`, attached): one event loop thread, a task scheduled every 1 ms,
-other threads submitting empty tasks at random times (Poisson): CPU of the event loop thread
-
-```
-tasks/s     Netty 4.1.139   Netty 4.2.19
-0           0.3%            0.3%
-1000        0.5%            10.5%
-4000        1.1%            28.2%
-```
-
-**Profile evidence** (event loop threads, µs per request, `jfrconv --cpu`, 2 recordings each)
-
-```
-                                           Vert.x 4.5   Vert.x 5
-selector poll (select, selectNow)               17.4      155.5
-loop around it (clock reads, reportActiveIoTime) 0.8       40.3
-runAllTasks                                      7.6       18.7
-I/O: read, decode, callbacks                    88.0       94.9
-SelectorImpl.selectNow                           0.1      136.9
-epoll_wait (libc)                               16.0      123.1
-clock_gettime / os::javaTimeNanos                1.8       50.1
-epoll_wait calls per request (method profile)    9.9       79.1
-```
-
-Nothing else grows: the Netty codec, `ContextBase.emit`, futures and promises, the SQL client, buffers and allocation (+6%) are the same or smaller.
-
-**Questions**
-
-- Is the nearest-millisecond rounding in `NioIoHandler` intended? The comment says "round up".
-- Can Vert.x do something (a timer granularity, an `IoHandler` option), or is this for Netty only? We can open the Netty issue.
-- Applications that need to be sure can use the native epoll transport, which isn't affected.
-
-**Attached:** `VertxCpuRepro.java`, `vertx-repro/build.gradle`, `NettyTimerSpin.java`, `netty-4.2-round-up.patch`,
-the JFR recordings `cpu-v4-perEventLoop-cachefalse-r1.jfr` and `cpu-vertx5-perEventLoop-cachefalse-r1.jfr`
-(about 5 MB each, from the benchmark), `reprocpu-v4-perEventLoop-cachefalse-timer-r1.jfr` and
-`reprocpu-vertx5-perEventLoop-cachefalse-timer-r1.jfr` (from the Vert.x-only reproducer), the differential flame graph
-`diff-perEventLoop-cachefalse.html`.
+The root cause is in Netty, so the issue is a Netty issue. The drafts (Netty issue, Netty pull request and a short note for Vert.x)
+and the status of the fix are in `NETTY_SELECT_ROUNDING.md`.
 
 ## 12. Files and how to run it
 
