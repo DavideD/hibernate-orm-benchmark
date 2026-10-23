@@ -403,3 +403,5 @@ Every request costs more CPU than with Vert.x 4.5, with or without stealing.
   at 4000 requests/s. With all the requests on one event loop, at 2000 requests/s,
   the plain pool stole nothing and the Quarkus-like pool 37% (section 7).
 - Vert.x 5.0.12 with Hibernate Reactive 4.4.0 gave the same results, within a few percent.
+- The extra CPU per request is not stealing or Hibernate Reactive: it is the Netty 4.2 event loop polling the selector
+  when a timer is pending. See `VERTX5_CPU_PROFILE.md`.
