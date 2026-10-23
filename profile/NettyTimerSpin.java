@@ -14,6 +14,7 @@ import io.netty.channel.nio.NioEventLoopGroup;
  * timer, and a few thousand tiny tasks per second submitted from another thread at random times, like I/O events.
  * Prints the CPU time of the event loop thread: with Netty 4.1 it's what the work costs, with 4.2 it's much more
  * because the event loop polls the selector in a loop (selectNow) in the last 0.5 ms before the timer.
+ * It also prints how late the timer runs: Netty 4.1 sleeps in select(ms) with the timeout rounded up, so it runs late.
  * Same code for Netty 4.1 and 4.2: run it with the jars of each version on the class path:
  * <pre>java -cp 'netty-4.2/*' NettyTimerSpin.java 1 5</pre>
  * Arguments: periodMs (default 1), seconds (default 5), submitted tasks per second (default 4000, 0 = none).
@@ -28,12 +29,23 @@ public class NettyTimerSpin {
 		EventLoop loop = group.next();
 		var runs = new AtomicLong();
 		var threadId = new AtomicLong();
+		// How late the scheduled task runs, in microseconds (only touched by the event loop thread, read after the run)
+		long[] lateness = new long[1_000_000];
+		int[] latenessCount = new int[1];
+		long[] expectedNs = new long[1];
+		boolean[] recording = new boolean[1];
 		Runnable[] task = new Runnable[1];
 		task[0] = () -> {
+			long now = System.nanoTime();
+			if ( recording[0] && latenessCount[0] < lateness.length ) {
+				lateness[latenessCount[0]++] = Math.max( 0, ( now - expectedNs[0] ) / 1000 );
+			}
 			threadId.set( Thread.currentThread().threadId() );
 			runs.incrementAndGet();
+			expectedNs[0] = now + TimeUnit.MILLISECONDS.toNanos( periodMs );
 			loop.schedule( task[0], periodMs, TimeUnit.MILLISECONDS );
 		};
+		expectedNs[0] = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos( periodMs );
 		loop.schedule( task[0], periodMs, TimeUnit.MILLISECONDS );
 		if ( perSecond > 0 ) {
 			var random = new java.util.SplittableRandom( 42 );
@@ -59,13 +71,20 @@ public class NettyTimerSpin {
 		}
 		TimeUnit.SECONDS.sleep( 1 );
 		var threads = ManagementFactory.getThreadMXBean();
+		recording[0] = true;
 		long cpuBefore = threads.getThreadCpuTime( threadId.get() );
 		long runsBefore = runs.get();
 		TimeUnit.SECONDS.sleep( seconds );
+		recording[0] = false;
 		long cpuMs = TimeUnit.NANOSECONDS.toMillis( threads.getThreadCpuTime( threadId.get() ) - cpuBefore );
 		System.out.printf( "Netty %s, task every %d ms: %d runs, event loop CPU %d ms in %d s (%.1f%% of a core)%n",
 				io.netty.util.Version.identify().get( "netty-transport" ).artifactVersion(), periodMs, runs.get() - runsBefore,
 				cpuMs, seconds, 100.0 * cpuMs / ( seconds * 1000 ) );
+		long[] sorted = java.util.Arrays.copyOf( lateness, latenessCount[0] );
+		java.util.Arrays.sort( sorted );
+		System.out.printf( "  timer lateness (us): mean %.0f, p50 %d, p99 %d, max %d%n",
+				java.util.Arrays.stream( sorted ).average().orElse( 0 ), sorted[sorted.length / 2],
+				sorted[(int) ( sorted.length * 0.99 )], sorted[sorted.length - 1] );
 		group.shutdownGracefully( 0, 0, TimeUnit.SECONDS );
 	}
 }
