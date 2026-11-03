@@ -35,9 +35,13 @@ final class LoadVerticle extends AbstractVerticle {
 	private static final long MAX_LATENCY_NS = TimeUnit.SECONDS.toNanos( 60 );
 
 	private final Mutiny.SessionFactory sessionFactory;
-	private final double ratePerSecond;
 	private final int queriesPerSession;
 	private final SplittableRandom random;
+	private final boolean readOnly;
+	// A native query that sleeps in the database for each session, or null
+	private final String sleepSql;
+
+	private double ratePerSecond;
 
 	private long timerId = -1;
 	private long nextArrivalNs;
@@ -46,21 +50,42 @@ final class LoadVerticle extends AbstractVerticle {
 	private boolean recording;
 	private Histogram histogram = new Histogram( MAX_LATENCY_NS, 3 );
 	private long completed;
+	private long scheduled;
 	private long failed;
 	private int inFlight;
 	private int maxInFlight;
 	private Throwable firstFailure;
 
 	LoadVerticle(Mutiny.SessionFactory sessionFactory, double ratePerSecond, int queriesPerSession, long seed) {
+		this( sessionFactory, ratePerSecond, queriesPerSession, seed, false, 0 );
+	}
+
+	/**
+	 * @param readOnly make the session read-only ({@code setDefaultReadOnly(true)})
+	 * @param dbSleepMs when &gt; 0, each session starts with a native query that sleeps this long in the database
+	 * ({@link Workload#sleepSql(double)}), to simulate a slower database
+	 */
+	LoadVerticle(Mutiny.SessionFactory sessionFactory, double ratePerSecond, int queriesPerSession, long seed, boolean readOnly,
+			double dbSleepMs) {
 		this.sessionFactory = sessionFactory;
 		this.ratePerSecond = ratePerSecond;
 		this.queriesPerSession = queriesPerSession;
 		this.random = new SplittableRandom( seed );
+		this.readOnly = readOnly;
+		this.sleepSql = dbSleepMs > 0 ? Workload.sleepSql( dbSleepMs ) : null;
 	}
 
 	@Override
 	public void start() {
-		if ( ratePerSecond > 0 ) {
+		restartArrivals();
+	}
+
+	private void restartArrivals() {
+		if ( timerId >= 0 ) {
+			vertx.cancelTimer( timerId );
+			timerId = -1;
+		}
+		if ( ratePerSecond > 0 && !stopped ) {
 			nextArrivalNs = System.nanoTime() + nextIntervalNs();
 			scheduleNext();
 		}
@@ -92,6 +117,9 @@ final class LoadVerticle extends AbstractVerticle {
 	}
 
 	private void send(long scheduledStartNs) {
+		if ( recording ) {
+			scheduled++;
+		}
 		inFlight++;
 		maxInFlight = Math.max( maxInFlight, inFlight );
 		session().subscribe().with(
@@ -104,9 +132,15 @@ final class LoadVerticle extends AbstractVerticle {
 		// Not withSession(): it reuses the session stored in the Vert.x context, and the requests of this verticle
 		// all run on the same context. Quarkus uses a different (duplicated) context for each request instead.
 		return sessionFactory.openSession().chain( session -> {
+			if ( readOnly ) {
+				session.setDefaultReadOnly( true );
+			}
 			Uni<?> chain = Uni.createFrom().voidItem();
+			if ( sleepSql != null ) {
+				chain = chain.chain( () -> session.createNativeQuery( sleepSql ).getSingleResult() );
+			}
 			for ( int i = 0; i < queriesPerSession; i++ ) {
-				int id = random.nextInt( ReactiveSetup.WORLD_COUNT ) + 1;
+				int id = random.nextInt( Workload.WORLD_COUNT ) + 1;
 				chain = chain.chain( () -> session.find( World.class, id ) );
 			}
 			return chain.replaceWithVoid().eventually( session::close );
@@ -149,6 +183,7 @@ final class LoadVerticle extends AbstractVerticle {
 		context.runOnContext( v -> {
 			histogram = new Histogram( MAX_LATENCY_NS, 3 );
 			completed = 0;
+			scheduled = 0;
 			failed = 0;
 			maxInFlight = inFlight;
 			firstFailure = null;
@@ -165,7 +200,20 @@ final class LoadVerticle extends AbstractVerticle {
 		Promise<Results> promise = Promise.promise();
 		context.runOnContext( v -> {
 			recording = false;
-			promise.complete( new Results( histogram, completed, failed, maxInFlight, firstFailure ) );
+			promise.complete( new Results( histogram, completed, scheduled, failed, maxInFlight, firstFailure ) );
+		} );
+		return promise.future();
+	}
+
+	/**
+	 * Change the rate from now on.
+	 */
+	Future<Void> setRate(double ratePerSecond) {
+		Promise<Void> promise = Promise.promise();
+		context.runOnContext( v -> {
+			this.ratePerSecond = ratePerSecond;
+			restartArrivals();
+			promise.complete();
 		} );
 		return promise.future();
 	}
@@ -197,6 +245,6 @@ final class LoadVerticle extends AbstractVerticle {
 		return context;
 	}
 
-	record Results(Histogram histogram, long completed, long failed, int maxInFlight, Throwable firstFailure) {
+	record Results(Histogram histogram, long completed, long scheduled, long failed, int maxInFlight, Throwable firstFailure) {
 	}
 }

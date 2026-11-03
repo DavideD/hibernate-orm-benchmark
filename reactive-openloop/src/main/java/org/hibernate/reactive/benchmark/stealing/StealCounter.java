@@ -34,10 +34,19 @@ final class StealCounter {
 	private final Map<EventLoop, LongAdder> requestsPerLoop = new ConcurrentHashMap<>();
 	// The pool keeps its connections open, so the map doesn't grow past the pool size
 	private final Map<Object, EventLoop> connections = Collections.synchronizedMap( new IdentityHashMap<>() );
+	private final boolean counting;
 	private volatile Pool delegate;
 
 	StealCounter(Vertx vertx) {
+		this( vertx, true );
+	}
+
+	/**
+	 * @param counting when false, the proxy only forwards the calls, so that the pool can still be replaced
+	 */
+	StealCounter(Vertx vertx, boolean counting) {
 		this.eventLoops = VertxInternals.eventLoops( vertx );
+		this.counting = counting;
 	}
 
 	Pool wrap(Pool pool) {
@@ -48,7 +57,7 @@ final class StealCounter {
 				(proxy, method, args) -> {
 					try {
 						Object result = method.invoke( delegate, args );
-						if ( "getConnection".equals( method.getName() ) && method.getParameterCount() == 0 ) {
+						if ( counting && "getConnection".equals( method.getName() ) && method.getParameterCount() == 0 ) {
 							return track( (Future<SqlConnection>) result );
 						}
 						return result;

@@ -27,15 +27,27 @@ import io.vertx.sqlclient.PoolOptions;
  * Starts Vert.x, the pool and the Hibernate Reactive {@link Mutiny.SessionFactory} used by the pool steal benchmarks,
  * and fills the {@link World} table.
  */
-final class ReactiveSetup {
+public final class ReactiveSetup {
 
 	static final int WORLD_COUNT = 10_000;
+
+	/**
+	 * The settings of the Vert.x PostgreSQL client that the steal benchmarks leave at their defaults.
+	 *
+	 * @param cachePreparedStatements {@link PgConnectOptions#setCachePreparedStatements(boolean)}
+	 * @param pipeliningLimit {@link PgConnectOptions#setPipeliningLimit(int)}, or 0 for the default of the client
+	 * @param countSteals count the stolen connections ({@link StealCounter}), which costs a little CPU for each session
+	 */
+	public record ClientOptions(boolean cachePreparedStatements, int pipeliningLimit, boolean countSteals) {
+		static final ClientOptions STEAL_BENCHMARK = new ClientOptions( false, 0, true );
+	}
 
 	final Vertx vertx;
 	final StealCounter stealCounter;
 	// The StealCounter proxy in front of the pool selected by poolType
 	final Pool pool;
 	final Mutiny.SessionFactory sessionFactory;
+	private final ClientOptions clientOptions;
 
 	private final String poolType;
 	private final long localWaitMs;
@@ -59,6 +71,22 @@ final class ReactiveSetup {
 	 */
 	ReactiveSetup(int eventLoopCount, String poolType, int poolSize, int poolEventLoopSize, long localWaitMs, LocalWaitConfig localWait,
 			boolean nativeTransport) {
+		this( eventLoopCount, poolType, poolSize, poolEventLoopSize, localWaitMs, localWait, nativeTransport, ClientOptions.STEAL_BENCHMARK );
+	}
+
+	/**
+	 * A Quarkus-like pool ({@code poolEventLoopSize} = the number of event loops) of {@code shared},
+	 * {@code localWait} (waiting {@code localWaitUs}) or {@code perEventLoop} connections.
+	 */
+	public ReactiveSetup(int eventLoopCount, String poolType, int poolSize, long localWaitUs, boolean nativeTransport,
+			ClientOptions clientOptions) {
+		this( eventLoopCount, poolType, poolSize, "shared".equals( poolType ) || "localWait".equals( poolType ) ? eventLoopCount : 0, 1, new LocalWaitConfig( localWaitUs, 0, true, new LocalWaitStats() ),
+				nativeTransport, clientOptions );
+	}
+
+	ReactiveSetup(int eventLoopCount, String poolType, int poolSize, int poolEventLoopSize, long localWaitMs, LocalWaitConfig localWait,
+			boolean nativeTransport, ClientOptions clientOptions) {
+		this.clientOptions = clientOptions;
 		this.poolType = poolType;
 		this.localWaitMs = localWaitMs;
 		this.localWait = localWait;
@@ -70,9 +98,12 @@ final class ReactiveSetup {
 				.setDatabase( "hibernate_orm_test" )
 				.setUser( "hibernate_orm_test" )
 				.setPassword( "hibernate_orm_test" )
-				.setCachePreparedStatements( false );
+				.setCachePreparedStatements( clientOptions.cachePreparedStatements() );
+		if ( clientOptions.pipeliningLimit() > 0 ) {
+			connectOptions.setPipeliningLimit( clientOptions.pipeliningLimit() );
+		}
 		poolOptions = new PoolOptions().setMaxSize( poolSize ).setEventLoopSize( poolEventLoopSize );
-		stealCounter = new StealCounter( vertx );
+		stealCounter = new StealCounter( vertx, clientOptions.countSteals() );
 		pool = stealCounter.wrap( createPool() );
 
 		var config = new Configuration();
@@ -152,7 +183,19 @@ final class ReactiveSetup {
 		}
 	}
 
-	void close() {
+	public Mutiny.SessionFactory sessionFactory() {
+		return sessionFactory;
+	}
+
+	public Vertx vertx() {
+		return vertx;
+	}
+
+	public boolean nativeTransport() {
+		return vertx.isNativeTransportEnabled();
+	}
+
+	public void close() {
 		sessionFactory.close();
 		pool.close().toCompletionStage().toCompletableFuture().join();
 		vertx.close().toCompletionStage().toCompletableFuture().join();

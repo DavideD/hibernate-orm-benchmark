@@ -5,12 +5,16 @@
 #
 # Environment variables:
 #   PODMAN   Container command (default: podman)
+#   CPUS     CPU quota of the container (default: 3)
+#   MAX_CONNECTIONS  max_connections of PostgreSQL (default: 100)
+#   CPUSET   CPUs to pin PostgreSQL to, e.g. 16-23: its processes are pinned with taskset once it is ready (needs sudo
+#            if the container is rootless), so that it doesn't compete with a benchmark pinned to other CPUs
 
 CONTAINER_NAME="postgres-bench"
 PG_USER="hibernate_orm_test"
 PG_PASS="hibernate_orm_test"
 PG_DB="hibernate_orm_test"
-CPUS=3
+CPUS=${CPUS:-3}
 USE_HOST_NETWORKING=false
 PODMAN=${PODMAN:-podman}
 
@@ -65,6 +69,7 @@ $PODMAN run --rm -d \
   -c max_wal_size=4GB \
   -c track_counts=off \
   -c checkpoint_timeout=1h \
+  -c max_connections="${MAX_CONNECTIONS:-100}" \
   -c work_mem=32MB \
   -c maintenance_work_mem=256MB || exit 1
 
@@ -73,4 +78,11 @@ echo "Waiting for PostgreSQL to be ready..."
 until $PODMAN exec "$CONTAINER_NAME" psql -U "$PG_USER" -d "$PG_DB" -h localhost -c 'select 1' > /dev/null 2>&1; do
   sleep 0.5
 done
+if [ -n "$CPUSET" ]; then
+  # The processes forked later (the backends) inherit the affinity of the postmaster
+  pid=$($PODMAN inspect -f '{{.State.Pid}}' "$CONTAINER_NAME")
+  sudo taskset -a -c -p "$CPUSET" "$pid" > /dev/null || exit 1
+  for backend in $(pgrep -P "$pid"); do sudo taskset -a -c -p "$CPUSET" "$backend" > /dev/null; done
+  echo "PostgreSQL pinned to CPUs $CPUSET"
+fi
 echo "PostgreSQL is ready on localhost:5432 (cpus=$CPUS, networking=${networking_flags})"
