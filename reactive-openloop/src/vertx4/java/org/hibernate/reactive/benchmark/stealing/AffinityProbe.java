@@ -17,6 +17,7 @@ import io.vertx.core.Vertx;
 import io.vertx.core.net.impl.pool.Executor;
 import io.vertx.core.net.impl.pool.PoolConnection;
 import io.vertx.core.net.impl.pool.PoolWaiter;
+import io.vertx.core.net.impl.pool.Task;
 import io.vertx.sqlclient.Pool;
 
 import org.HdrHistogram.Histogram;
@@ -69,13 +70,12 @@ final class AffinityProbe {
 	@SuppressWarnings("unchecked")
 	static AffinityProbe install(Pool pool, Vertx vertx) {
 		try {
-			Object sqlConnectionPool = read( unwrap( pool ), "pool" );
-			Object connectionPool = read( sqlConnectionPool, "pool" );
-			Field syncField = field( connectionPool.getClass(), "sync" );
-			Field slotsField = field( connectionPool.getClass(), "slots" );
-			Field sizeField = field( connectionPool.getClass(), "size" );
+			Object connectionPool = PoolReflection.connectionPool( pool );
+			Field syncField = PoolReflection.executorField( connectionPool );
+			Field slotsField = PoolReflection.field( connectionPool.getClass(), "slots" );
+			Field sizeField = PoolReflection.field( connectionPool.getClass(), "size" );
 			Executor<Object> sync = (Executor<Object>) syncField.get( connectionPool );
-			Field slotField = field( Class.forName( connectionPool.getClass().getName() + "$Recycle" ), "slot" );
+			Field slotField = PoolReflection.field( Class.forName( connectionPool.getClass().getName() + "$Recycle" ), "slot" );
 
 			var probe = new AffinityProbe( vertx, slotField );
 			Executor<Object> instrumented = action -> probe.submit( sync, action, slotsField, sizeField );
@@ -90,22 +90,38 @@ final class AffinityProbe {
 	private void submit(Executor<Object> sync, Executor.Action<Object> action, Field slotsField, Field sizeField) {
 		switch ( action.getClass().getSimpleName() ) {
 			case "Recycle" -> {
-				int eventLoop = indexOf( ( (PoolConnection<?>) read( action, slotField ) ).context().nettyEventLoop() );
+				int eventLoop = indexOf( ( (PoolConnection<?>) PoolReflection.read( action, slotField ) ).context().nettyEventLoop() );
 				pendingReleases.incrementAndGet( eventLoop );
-				sync.submit( state -> {
-					pendingReleases.decrementAndGet( eventLoop );
-					released( eventLoop );
-					return action.execute( state );
-				} );
+				sync.submit( new Release( action, eventLoop ) );
 			}
 			case "Acquire" -> {
 				int eventLoop = indexOf( ( (PoolWaiter<?>) action ).context().nettyEventLoop() );
 				sync.submit( state -> {
-					acquiring( eventLoop, (Object[]) read( state, slotsField ), (int) read( state, sizeField ) );
+					acquiring( eventLoop, (Object[]) PoolReflection.read( state, slotsField ), (int) PoolReflection.read( state, sizeField ) );
 					return action.execute( state );
 				} );
 			}
 			default -> sync.submit( action );
+		}
+	}
+
+	/**
+	 * A release, wrapped to count it. A class, not a lambda, so that {@link ReleasesFirstExecutor} can recognize it.
+	 */
+	final class Release implements Executor.Action<Object> {
+		private final Executor.Action<Object> recycle;
+		private final int eventLoop;
+
+		private Release(Executor.Action<Object> recycle, int eventLoop) {
+			this.recycle = recycle;
+			this.eventLoop = eventLoop;
+		}
+
+		@Override
+		public Task execute(Object state) {
+			pendingReleases.decrementAndGet( eventLoop );
+			released( eventLoop );
+			return recycle.execute( state );
 		}
 	}
 
@@ -173,52 +189,5 @@ final class AffinityProbe {
 
 	private static Histogram newHistogram() {
 		return new Histogram( TimeUnit.SECONDS.toNanos( 10 ), 3 );
-	}
-
-	private static Object read(Object target, Field field) {
-		try {
-			return field.get( target );
-		}
-		catch (IllegalAccessException e) {
-			throw new IllegalStateException( e );
-		}
-	}
-
-	/**
-	 * The pool can be a wrapper (PgPoolImpl in Vert.x 4) of the pool implementation (PoolImpl)
-	 */
-	private static Object unwrap(Pool pool) throws IllegalAccessException {
-		Object current = pool;
-		Field delegate;
-		while ( ( delegate = fieldOrNull( current.getClass(), "delegate" ) ) != null ) {
-			current = delegate.get( current );
-		}
-		return current;
-	}
-
-	private static Object read(Object target, String name) throws NoSuchFieldException, IllegalAccessException {
-		return field( target.getClass(), name ).get( target );
-	}
-
-	private static Field field(Class<?> type, String name) throws NoSuchFieldException {
-		Field field = fieldOrNull( type, name );
-		if ( field == null ) {
-			throw new NoSuchFieldException( type.getName() + "." + name );
-		}
-		return field;
-	}
-
-	private static Field fieldOrNull(Class<?> type, String name) {
-		for ( Class<?> current = type; current != null; current = current.getSuperclass() ) {
-			try {
-				Field field = current.getDeclaredField( name );
-				field.setAccessible( true );
-				return field;
-			}
-			catch (NoSuchFieldException e) {
-				// Try the superclass
-			}
-		}
-		return null;
 	}
 }

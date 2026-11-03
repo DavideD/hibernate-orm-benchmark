@@ -335,6 +335,40 @@ What the numbers show:
 - The probe adds some work to every action of the pool (about 3% more CPU per request here),
   so it's off by default. Only tested with Vert.x 4.5.
 
+### Processing the releases first
+
+`poolType=releasesFirst` tries the change that would fix this: it's the shared Vert.x pool (Quarkus-like),
+with its executor replaced by `ReleasesFirstExecutor`. Releases and the other actions go to separate queues,
+and each time the pool runs, it first processes all the pending releases, then the next other action.
+An acquisition then sees every connection whose release has been submitted, even after it.
+The rest of the pool is unchanged.
+
+It works, but it rarely has anything to do: a test version that counted the reordering found
+7 to 68 acquisitions out of 26,000 to 105,000 (0.03–0.06%) that got a release submitted after them first,
+at 2000 to 8000 requests/s. The thread that releases a connection usually runs the pool itself, right away,
+so the release doesn't wait behind an acquisition. And it changes nothing measurable,
+with 1 connection per event loop (`poolSize=4`):
+
+| Version | Requests/s | Pool | Stolen | CPU per request | p50 | p99 |
+|---|---|---|---|---|---|---|
+| Vert.x 4.5 | 2000 | `shared` | 34–35% | 150–158 µs | 1.09–1.13 ms | 2.3–2.5 ms |
+| Vert.x 4.5 | 2000 | `releasesFirst` | 34–35% | 151–155 µs | 1.10 ms | 2.2–2.4 ms |
+| Vert.x 4.5 | 8000 | `shared` | 75% | 175–177 µs | 1.86–1.93 ms | 15–28 ms |
+| Vert.x 4.5 | 8000 | `releasesFirst` | 75% | 174–177 µs | 1.82–2.06 ms | 5.5–21 ms |
+| Vert.x 5.1 | 2000 | `shared` | 32% | 239–241 µs | 1.03 ms | 1.9–2.3 ms |
+| Vert.x 5.1 | 2000 | `releasesFirst` | 31% | 229–230 µs | 1.01–1.02 ms | 1.9 ms |
+| Vert.x 5.1 | 4000 | `shared` | 53–54% | 305–310 µs | 1.06–1.07 ms | 2.0–2.1 ms |
+| Vert.x 5.1 | 4000 | `releasesFirst` | 53% | 304–308 µs | 1.06 ms | 2.0 ms |
+| Vert.x 5.1 | 8000 | `shared` | 70% | 306–307 µs | 1.29–1.30 ms | 7.4–9.0 ms |
+| Vert.x 5.1 | 8000 | `releasesFirst` | 69–70% | 305–306 µs | 1.28–1.29 ms | 4.6–5.6 ms |
+
+2 runs for each line, 3 for Vert.x 4.5 at 8000 requests/s (alternating the pools).
+The Vert.x 4.5 runs at 4000 requests/s and above had large latency outliers with both pools on that day.
+The probe (it works on top of `releasesFirst`) counted no missed acquisitions with either pool.
+
+To avoid the steals, an acquisition has to wait for a connection of its event loop that's still in use,
+like `preferLocalWait` (section 9) does, not only see the releases that are already submitted.
+
 ## 11. Vert.x 5
 
 The same runs with Vert.x 5.1.10, Hibernate Reactive 4.5.11 and ORM 7.4.13 (`STACK=vertx5`),

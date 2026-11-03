@@ -45,6 +45,7 @@ public final class OpenLoopStealBenchmark {
 	static {
 		DEFAULTS.put( "eventLoops", "4" );
 		// shared, perEventLoop (no stealing, poolSize / eventLoops connections per event loop),
+		// releasesFirst (shared, processes the releases of connections first, see ReleasesFirstExecutor),
 		// or a StealPolicyPool policy: always, alwaysActive, preferLocalWait, never
 		DEFAULTS.put( "poolType", "shared" );
 		DEFAULTS.put( "poolSize", "16" );
@@ -61,7 +62,7 @@ public final class OpenLoopStealBenchmark {
 		DEFAULTS.put( "durationSeconds", "20" );
 		DEFAULTS.put( "seed", "42" );
 		// Count the acquisitions that miss a connection of their event loop because its release is still in the
-		// queue of the pool (shared pool only, see AffinityProbe). It adds some work to the pool.
+		// queue of the pool (shared and releasesFirst only, see AffinityProbe). It adds some work to the pool.
 		DEFAULTS.put( "probe", "false" );
 	}
 
@@ -87,14 +88,14 @@ public final class OpenLoopStealBenchmark {
 		long durationSeconds = Long.parseLong( options.get( "durationSeconds" ) );
 		long seed = Long.parseLong( options.get( "seed" ) );
 		boolean probe = Boolean.parseBoolean( options.get( "probe" ) );
-		if ( probe && !"shared".equals( poolType ) ) {
-			throw new IllegalArgumentException( "probe only works with poolType=shared" );
+		if ( probe && !"shared".equals( poolType ) && !"releasesFirst".equals( poolType ) ) {
+			throw new IllegalArgumentException( "probe only works with poolType=shared or releasesFirst" );
 		}
 		if ( weights.length != eventLoops ) {
 			throw new IllegalArgumentException( "weights needs one value per event loop: " + options.get( "weights" ) );
 		}
-		if ( !"shared".equals( poolType ) ) {
-			// Only the shared pool uses it, show it in the results
+		if ( !"shared".equals( poolType ) && !"releasesFirst".equals( poolType ) ) {
+			// Only the shared pools use it, show it in the results
 			options.put( "poolEventLoopSize", "0" );
 			poolEventLoopSize = 0;
 		}
