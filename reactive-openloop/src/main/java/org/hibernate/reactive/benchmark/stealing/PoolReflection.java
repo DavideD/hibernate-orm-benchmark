@@ -22,14 +22,23 @@ final class PoolReflection {
 	 * @return the {@code SimpleConnectionPool} that manages the connections of the pool
 	 */
 	static Object connectionPool(Pool pool) throws ReflectiveOperationException {
+		Object sqlConnectionPool = sqlConnectionPool( pool );
+		return field( sqlConnectionPool.getClass(), "pool" ).get( sqlConnectionPool );
+	}
+
+	/**
+	 * @param pool a pool created with {@link Pool#pool}, not a proxy
+	 * @return the {@code SqlConnectionPool} of the pool, that holds the {@code SimpleConnectionPool}
+	 * in its {@code pool} field
+	 */
+	static Object sqlConnectionPool(Pool pool) throws ReflectiveOperationException {
 		// The pool can be a wrapper (PgPoolImpl in Vert.x 4) of the pool implementation (PoolImpl)
 		Object current = pool;
 		Field delegate;
 		while ( ( delegate = fieldOrNull( current.getClass(), "delegate" ) ) != null ) {
 			current = delegate.get( current );
 		}
-		Object sqlConnectionPool = field( current.getClass(), "pool" ).get( current );
-		return field( sqlConnectionPool.getClass(), "pool" ).get( sqlConnectionPool );
+		return field( current.getClass(), "pool" ).get( current );
 	}
 
 	/**
