@@ -1,34 +1,14 @@
 package org.hibernate.reactive.benchmark.stealing;
 
-import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.CopyOnWriteArrayList;
-import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
-import org.hibernate.cfg.AvailableSettings;
-import org.hibernate.cfg.Configuration;
-import org.hibernate.engine.jdbc.spi.SqlExceptionHelper;
-import org.hibernate.engine.jdbc.spi.SqlStatementLogger;
-import org.hibernate.reactive.mutiny.Mutiny;
-import org.hibernate.reactive.pool.ReactiveConnectionPool;
-import org.hibernate.reactive.pool.impl.ExternalSqlClientPool;
-import org.hibernate.reactive.provider.ReactiveServiceRegistryBuilder;
-import org.hibernate.reactive.vertx.VertxInstance;
-
-import io.smallrye.mutiny.Uni;
 import io.vertx.core.DeploymentOptions;
-import io.vertx.core.Vertx;
-import io.vertx.core.VertxOptions;
 import io.vertx.core.json.JsonObject;
-import io.vertx.pgclient.PgConnectOptions;
-import io.vertx.sqlclient.Pool;
-import io.vertx.sqlclient.PoolOptions;
 
 import org.HdrHistogram.Histogram;
-import org.openjdk.jmh.annotations.AuxCounters;
 import org.openjdk.jmh.annotations.Benchmark;
 import org.openjdk.jmh.annotations.BenchmarkMode;
 import org.openjdk.jmh.annotations.Fork;
@@ -61,107 +41,58 @@ public class ReactivePoolStealBenchmark {
 	@Param({"-1"})
 	int targetVerticle;
 
-	private Mutiny.SessionFactory sessionFactory;
-	private Vertx vertx;
-	private Pool sharedPool;
+	@Param({"2"})
+	int poolSize;
+
+	// When > 0, mimics Quarkus: PoolOptions#setEventLoopSize spreads connections across event loops
+	@Param({"0"})
+	int poolEventLoopSize;
+
+	// shared = one pool for all the event loops (like Quarkus),
+	// perEventLoop = one pool per event loop with poolSize / eventLoopCount connections each (ignores poolEventLoopSize)
+	@Param({"shared"})
+	String poolType;
+
+	private ReactiveSetup setup;
 	private final AtomicInteger verticleIndex = new AtomicInteger();
 	private List<String> deploymentIds;
 
 	@Setup(Level.Trial)
 	public void setup() {
-		var vertxOptions = new VertxOptions().setEventLoopPoolSize( eventLoopCount );
-		vertx = Vertx.vertx( vertxOptions );
-
-		var connectOptions = new PgConnectOptions()
-				.setHost( "localhost" )
-				.setPort( 5432 )
-				.setDatabase( "hibernate_orm_test" )
-				.setUser( "hibernate_orm_test" )
-				.setPassword( "hibernate_orm_test" )
-				.setCachePreparedStatements( false );
-		var poolOptions = new PoolOptions().setMaxSize( 2 );
-		sharedPool = Pool.pool( vertx, connectOptions, poolOptions );
-
-		var config = new Configuration();
-		config.addAnnotatedClass( World.class );
-		config.setProperty( AvailableSettings.JAKARTA_JDBC_URL,
-				"jdbc:postgresql://localhost/hibernate_orm_test?preparedStatementCacheQueries=0" );
-		config.setProperty( AvailableSettings.JAKARTA_JDBC_USER, "hibernate_orm_test" );
-		config.setProperty( AvailableSettings.JAKARTA_JDBC_PASSWORD, "hibernate_orm_test" );
-		config.setProperty( AvailableSettings.SHOW_SQL, "false" );
-		config.setProperty( AvailableSettings.FORMAT_SQL, "false" );
-		config.setProperty( AvailableSettings.HBM2DDL_AUTO, "create" );
-		config.setProperty( AvailableSettings.STATEMENT_BATCH_SIZE, "0" );
-		config.setProperty( "hibernate.generate_statistics", "false" );
-		config.setProperty( AvailableSettings.POOL_SIZE, "2" );
-
-		var externalPool = new ExternalSqlClientPool(
-				sharedPool,
-				new SqlStatementLogger( false, false ),
-				new SqlExceptionHelper( true )
-		);
-
-		var srb = new ReactiveServiceRegistryBuilder()
-				.addService( VertxInstance.class, (VertxInstance) () -> vertx )
-				.addService( ReactiveConnectionPool.class, externalPool )
-				.applySettings( config.getProperties() );
-
-		sessionFactory = config.buildSessionFactory( srb.build() )
-				.unwrap( Mutiny.SessionFactory.class );
-
-		populateWorlds();
+		setup = new ReactiveSetup( eventLoopCount, poolType, poolSize, poolEventLoopSize );
 		deployVerticles();
-	}
-
-	private void populateWorlds() {
-		final int batchSize = 500;
-		for ( int batch = 0; batch < 10_000 / batchSize; batch++ ) {
-			final int start = batch * batchSize;
-			sessionFactory.withTransaction( (session, tx) -> {
-				Uni<Void> chain = Uni.createFrom().voidItem();
-				for ( int i = start; i < start + batchSize; i++ ) {
-					final World world = new World();
-					world.setId( i + 1 );
-					world.setRandomNumber( ThreadLocalRandom.current().nextInt( 10_000 ) );
-					chain = chain.chain( () -> session.persist( world ) );
-				}
-				return chain.chain( session::flush );
-			} ).await().atMost( Duration.ofMinutes( 2 ) );
-		}
 	}
 
 	private void deployVerticles() {
 		deploymentIds = new ArrayList<>( eventLoopCount );
 		for ( int i = 0; i < eventLoopCount; i++ ) {
-			var verticle = new WorkerVerticle( sessionFactory, i );
-			var id = vertx.deployVerticle( verticle, new DeploymentOptions() )
+			var verticle = new WorkerVerticle( setup.sessionFactory, i );
+			var id = setup.vertx.deployVerticle( verticle, new DeploymentOptions() )
 					.toCompletionStage().toCompletableFuture().join();
 			deploymentIds.add( id );
 		}
+	}
+
+	@Setup(Level.Iteration)
+	public void resetStealCounter() {
+		setup.stealCounter.reset();
+	}
+
+	@TearDown(Level.Iteration)
+	public void reportStealCounter() {
+		System.out.println( "\n=== Steal: " + setup.stealCounter.report() );
 	}
 
 	@TearDown(Level.Trial)
 	public void teardown() {
 		if ( deploymentIds != null ) {
 			for ( var id : deploymentIds ) {
-				vertx.undeploy( id ).toCompletionStage().toCompletableFuture().join();
+				setup.vertx.undeploy( id ).toCompletionStage().toCompletableFuture().join();
 			}
 		}
-		if ( sessionFactory != null ) {
-			sessionFactory.close();
+		if ( setup != null ) {
+			setup.close();
 		}
-		if ( sharedPool != null ) {
-			sharedPool.close().toCompletionStage().toCompletableFuture().join();
-		}
-		if ( vertx != null ) {
-			vertx.close().toCompletionStage().toCompletableFuture().join();
-		}
-	}
-
-	@State(Scope.Thread)
-	@AuxCounters(AuxCounters.Type.OPERATIONS)
-	public static class Counters {
-		public long queries;
 	}
 
 	@State(Scope.Thread)
@@ -186,6 +117,8 @@ public class ReactivePoolStealBenchmark {
 	@State(Scope.Thread)
 	public static class LatencyState {
 		private static final long SLOW_THRESHOLD_NS = TimeUnit.MILLISECONDS.toNanos( 1 );
+		// With sleepMs >= 1 every operation is slow: only keep the first ones
+		private static final int MAX_SLOW_OPS = 100;
 
 		// Rate for the "cool" thread (verticle 1+)
 		@Param({"0"})
@@ -199,7 +132,8 @@ public class ReactivePoolStealBenchmark {
 		long nextExpectedStartNs;
 		long iterationStartNs;
 		long effectiveInterArrivalNs;
-		CopyOnWriteArrayList<long[]> slowOps;
+		List<long[]> slowOps;
+		long slowOpsCount;
 
 		@Setup(Level.Iteration)
 		public void setup(ThreadContext tc) {
@@ -208,7 +142,8 @@ public class ReactivePoolStealBenchmark {
 			iterationStartNs = System.nanoTime();
 			effectiveInterArrivalNs = (tc.hot && hotInterArrivalNs > 0)
 					? hotInterArrivalNs : targetInterArrivalNs;
-			slowOps = new CopyOnWriteArrayList<>();
+			slowOps = new ArrayList<>( MAX_SLOW_OPS );
+			slowOpsCount = 0;
 		}
 
 		public long awaitExpectedStart() {
@@ -232,8 +167,10 @@ public class ReactivePoolStealBenchmark {
 			long elapsed = endNs - expectedStartNs;
 			histogram.recordValue( Math.max( elapsed, 0 ) );
 			if ( elapsed > SLOW_THRESHOLD_NS ) {
-				long offsetNs = endNs - iterationStartNs;
-				slowOps.add( new long[]{ offsetNs, elapsed } );
+				if ( slowOpsCount++ < MAX_SLOW_OPS ) {
+					long offsetNs = endNs - iterationStartNs;
+					slowOps.add( new long[]{ offsetNs, elapsed } );
+				}
 			}
 		}
 
@@ -250,8 +187,8 @@ public class ReactivePoolStealBenchmark {
 				System.out.printf( "  P99.9:  %.1f%n", histogram.getValueAtPercentile( 99.9 ) / 1000.0 );
 				System.out.printf( "  Max:    %.1f%n", histogram.getMaxValue() / 1000.0 );
 				if ( !slowOps.isEmpty() ) {
-					System.out.printf( "  Slow (>1ms): %d ops%n", slowOps.size() );
-					System.out.println( "  Slow ops (offset_ms, latency_ms):" );
+					System.out.printf( "  Slow (>1ms): %d ops%n", slowOpsCount );
+					System.out.printf( "  First %d slow ops (offset_ms, latency_ms):%n", slowOps.size() );
 					for ( var op : slowOps ) {
 						System.out.printf( "    t=%.1f  lat=%.1f%n", op[0] / 1_000_000.0, op[1] / 1_000_000.0 );
 					}
@@ -266,26 +203,24 @@ public class ReactivePoolStealBenchmark {
 
 	private void sendToVerticle(String address, int sleepMs) {
 		var msg = new JsonObject().put( "sleepMs", sleepMs );
-		vertx.eventBus().<String>request( address, msg )
+		setup.vertx.eventBus().<String>request( address, msg )
 				.toCompletionStage().toCompletableFuture().join();
 	}
 
 	@Benchmark
 	@BenchmarkMode(Mode.Throughput)
 	@OutputTimeUnit(TimeUnit.SECONDS)
-	public void throughput(Counters counters, ThreadContext tc) {
+	public void throughput(ThreadContext tc) {
 		sendToVerticle( tc.verticleAddress, sleepMs );
-		counters.queries++;
 	}
 
 	@Benchmark
 	@BenchmarkMode(Mode.Throughput)
 	@OutputTimeUnit(TimeUnit.SECONDS)
-	public void latency(Counters counters, LatencyState lat, ThreadContext tc) {
+	public void latency(LatencyState lat, ThreadContext tc) {
 		long expectedStart = lat.awaitExpectedStart();
 
 		sendToVerticle( tc.verticleAddress, sleepMs );
-		counters.queries++;
 
 		lat.recordLatency( expectedStart );
 	}
@@ -294,6 +229,8 @@ public class ReactivePoolStealBenchmark {
 		var bench = new ReactivePoolStealBenchmark();
 		bench.eventLoopCount = 2;
 		bench.sleepMs = 0;
+		bench.poolSize = 2;
+		bench.poolType = "shared";
 		bench.setup();
 
 		try {

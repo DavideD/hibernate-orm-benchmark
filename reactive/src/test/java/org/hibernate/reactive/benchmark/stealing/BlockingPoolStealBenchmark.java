@@ -1,6 +1,7 @@
 package org.hibernate.reactive.benchmark.stealing;
 
-import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 
@@ -9,7 +10,6 @@ import org.hibernate.cfg.AvailableSettings;
 import org.hibernate.cfg.Configuration;
 
 import org.HdrHistogram.Histogram;
-import org.openjdk.jmh.annotations.AuxCounters;
 import org.openjdk.jmh.annotations.Benchmark;
 import org.openjdk.jmh.annotations.BenchmarkMode;
 import org.openjdk.jmh.annotations.Fork;
@@ -86,14 +86,10 @@ public class BlockingPoolStealBenchmark {
 	}
 
 	@State(Scope.Thread)
-	@AuxCounters(AuxCounters.Type.OPERATIONS)
-	public static class Counters {
-		public long queries;
-	}
-
-	@State(Scope.Thread)
 	public static class LatencyState {
 		private static final long SLOW_THRESHOLD_NS = TimeUnit.MILLISECONDS.toNanos( 1 );
+		// With sleepMs >= 1 every operation is slow: only keep the first ones
+		private static final int MAX_SLOW_OPS = 100;
 
 		@Param({"0"})
 		long targetInterArrivalNs;
@@ -101,14 +97,16 @@ public class BlockingPoolStealBenchmark {
 		Histogram histogram;
 		long nextExpectedStartNs;
 		long iterationStartNs;
-		CopyOnWriteArrayList<long[]> slowOps;
+		List<long[]> slowOps;
+		long slowOpsCount;
 
 		@Setup(Level.Iteration)
 		public void setup() {
 			histogram = new Histogram( TimeUnit.SECONDS.toNanos( 30 ), 3 );
 			nextExpectedStartNs = 0;
 			iterationStartNs = System.nanoTime();
-			slowOps = new CopyOnWriteArrayList<>();
+			slowOps = new ArrayList<>( MAX_SLOW_OPS );
+			slowOpsCount = 0;
 		}
 
 		public long awaitExpectedStart() {
@@ -132,8 +130,10 @@ public class BlockingPoolStealBenchmark {
 			long elapsed = endNs - expectedStartNs;
 			histogram.recordValue( Math.max( elapsed, 0 ) );
 			if ( elapsed > SLOW_THRESHOLD_NS ) {
-				long offsetNs = endNs - iterationStartNs;
-				slowOps.add( new long[]{ offsetNs, elapsed } );
+				if ( slowOpsCount++ < MAX_SLOW_OPS ) {
+					long offsetNs = endNs - iterationStartNs;
+					slowOps.add( new long[]{ offsetNs, elapsed } );
+				}
 			}
 		}
 
@@ -150,8 +150,8 @@ public class BlockingPoolStealBenchmark {
 				System.out.printf( "  P99.9:  %.1f%n", histogram.getValueAtPercentile( 99.9 ) / 1000.0 );
 				System.out.printf( "  Max:    %.1f%n", histogram.getMaxValue() / 1000.0 );
 				if ( !slowOps.isEmpty() ) {
-					System.out.printf( "  Slow (>1ms): %d ops%n", slowOps.size() );
-					System.out.println( "  Slow ops (offset_ms, latency_ms):" );
+					System.out.printf( "  Slow (>1ms): %d ops%n", slowOpsCount );
+					System.out.printf( "  First %d slow ops (offset_ms, latency_ms):%n", slowOps.size() );
 					for ( var op : slowOps ) {
 						System.out.printf( "    t=%.1f  lat=%.1f%n", op[0] / 1_000_000.0, op[1] / 1_000_000.0 );
 					}
@@ -180,19 +180,17 @@ public class BlockingPoolStealBenchmark {
 	@Benchmark
 	@BenchmarkMode(Mode.Throughput)
 	@OutputTimeUnit(TimeUnit.SECONDS)
-	public void throughput(Counters counters) {
+	public void throughput() {
 		sleepThenFind( sleepMs );
-		counters.queries++;
 	}
 
 	@Benchmark
 	@BenchmarkMode(Mode.Throughput)
 	@OutputTimeUnit(TimeUnit.SECONDS)
-	public void latency(Counters counters, LatencyState lat) {
+	public void latency(LatencyState lat) {
 		long expectedStart = lat.awaitExpectedStart();
 
 		sleepThenFind( sleepMs );
-		counters.queries++;
 
 		lat.recordLatency( expectedStart );
 	}
@@ -201,12 +199,11 @@ public class BlockingPoolStealBenchmark {
 		var bench = new BlockingPoolStealBenchmark();
 		bench.sleepMs = 0;
 		bench.setup();
-		var counters = new Counters();
 		try {
 			for ( int i = 0; i < 10; i++ ) {
-				bench.throughput( counters );
+				bench.throughput();
 			}
-			System.out.println( "Queries executed: " + counters.queries );
+			System.out.println( "Completed 10 invocations" );
 		}
 		finally {
 			bench.teardown();

@@ -2,6 +2,9 @@
 
 # Start a perf-tuned PostgreSQL container for benchmarking.
 # Based on https://github.com/quarkusio/spring-quarkus-perf-comparison/blob/main/scripts/infra.sh
+#
+# Environment variables:
+#   PODMAN   Container command (default: podman)
 
 CONTAINER_NAME="postgres-bench"
 PG_USER="hibernate_orm_test"
@@ -9,6 +12,7 @@ PG_PASS="hibernate_orm_test"
 PG_DB="hibernate_orm_test"
 CPUS=3
 USE_HOST_NETWORKING=false
+PODMAN=${PODMAN:-podman}
 
 usage() {
   echo "Usage: $0 [-n] [start|stop]"
@@ -30,7 +34,7 @@ shift $((OPTIND - 1))
 ACTION=${1:-start}
 
 if [[ "$ACTION" == "stop" ]]; then
-  podman stop "$CONTAINER_NAME" 2>/dev/null
+  $PODMAN stop "$CONTAINER_NAME" 2>/dev/null
   echo "Stopped $CONTAINER_NAME"
   exit 0
 fi
@@ -41,9 +45,9 @@ else
   networking_flags="-p 5432:5432"
 fi
 
-podman stop "$CONTAINER_NAME" 2>/dev/null
+$PODMAN stop "$CONTAINER_NAME" 2>/dev/null
 
-podman run --rm -d \
+$PODMAN run --rm -d \
   --name "$CONTAINER_NAME" \
   ${networking_flags} \
   --cpus "$CPUS" \
@@ -62,10 +66,11 @@ podman run --rm -d \
   -c track_counts=off \
   -c checkpoint_timeout=1h \
   -c work_mem=32MB \
-  -c maintenance_work_mem=256MB
+  -c maintenance_work_mem=256MB || exit 1
 
 echo "Waiting for PostgreSQL to be ready..."
-until podman exec "$CONTAINER_NAME" pg_isready -U "$PG_USER" -q 2>/dev/null; do
+# pg_isready can answer before the init scripts are done, so wait for a real query
+until $PODMAN exec "$CONTAINER_NAME" psql -U "$PG_USER" -d "$PG_DB" -h localhost -c 'select 1' > /dev/null 2>&1; do
   sleep 0.5
 done
 echo "PostgreSQL is ready on localhost:5432 (cpus=$CPUS, networking=${networking_flags})"
