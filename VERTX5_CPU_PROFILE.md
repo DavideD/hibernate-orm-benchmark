@@ -6,6 +6,9 @@ This document profiles both stacks with async-profiler and finds out where the C
 
 ## 1. Summary
 
+**Update:** the cause is fixed in Netty 4.2.20.Final (netty/netty#18138, released on 2026-11-02).
+With it, Vert.x 5 uses about the same event loop CPU as Vert.x 4.5: see `NETTY_SELECT_ROUNDING.md` section 9.
+
 - The extra CPU is **not** in Vert.x, the SQL client or Hibernate Reactive code.
   It is the event loop polling the selector in a loop.
 - With Vert.x 5.1.10, Netty 4.2.19 (`NioIoHandler`) calls `Selector.selectNow()` again and again

@@ -376,6 +376,8 @@ like `preferLocalWait` (section 9) does, not only see the releases that are alre
 The same runs with Vert.x 5.1.10, Hibernate Reactive 4.5.11 and ORM 7.4.13 (`STACK=vertx5`),
 one 20 s run for each line, give the same results.
 Every request costs more CPU than with Vert.x 4.5, with or without stealing.
+That was Netty 4.2.19, which Vert.x 5.1.10 brings: the extra CPU is a Netty bug, fixed in Netty 4.2.20.Final.
+See the results with the fix at the end of this section.
 
 **1 connection per event loop (`poolSize=4`), same load on every event loop:**
 
@@ -407,6 +409,38 @@ Every request costs more CPU than with Vert.x 4.5, with or without stealing.
 - Vert.x 5.0.12 with Hibernate Reactive 4.4.0 gave the same results, within a few percent.
 - The extra CPU per request is not stealing or Hibernate Reactive: it is the Netty 4.2 event loop polling the selector
   when a timer is pending. See `VERTX5_CPU_PROFILE.md`.
+
+### With Netty 4.2.20.Final
+
+The same matrix on 2026-11-03, with all the Netty modules replaced by 4.2.20.Final, which has the fix
+(`-PnettyVersion=4.2.20.Final`, see `NETTY_SELECT_ROUNDING.md` section 9).
+One 20 s run for each line, and Vert.x 4.5 measured again on the same machine for the last column:
+
+| Requests/s | Pool | Stolen | CPU per request | Sleeps per request | p50 | p99 | Vert.x 4.5: stolen, CPU per request |
+|---|---|---|---|---|---|---|---|
+| 2000 | `shared` | 38% | 142 µs | 14.2 | 1.24 ms | 2.4 ms | 37%, 130 µs |
+| 2000 | `perEventLoop` | 0% | 113 µs | 10.8 | 1.31 ms | 2.5 ms | 0%, 108 µs |
+| 2000 | `always` | 38% | 150 µs | 14.3 | 1.24 ms | 2.4 ms | 37%, 134 µs |
+| 2000 | `alwaysActive` | 30% | 138 µs | 13.6 | 1.25 ms | 2.4 ms | 30%, 126 µs |
+| 2000 | `preferLocalWait` | 2% | 118 µs | 11.0 | 1.32 ms | 2.5 ms | 1%, 108 µs |
+| 2000 | `never` | 0% | 120 µs | 10.8 | 1.32 ms | 2.6 ms | 0%, 108 µs |
+| 4000 | `shared` | 68% | 161 µs | 15.8 | 1.46 ms | 2.9 ms | 67%, 142 µs |
+| 4000 | `perEventLoop` | 0% | 111 µs | 10.4 | 1.65 ms | 3.9 ms | 0%, 107 µs |
+| 4000 | `always` | 68% | 164 µs | 16.2 | 1.47 ms | 2.9 ms | 68%, 141 µs |
+| 4000 | `alwaysActive` | 37% | 144 µs | 13.6 | 1.52 ms | 3.6 ms | 36%, 136 µs |
+| 4000 | `preferLocalWait` | 11% | 123 µs | 11.4 | 1.63 ms | 3.5 ms | 10%, 117 µs |
+| 4000 | `never` | 0% | 113 µs | 10.4 | 1.63 ms | 3.3 ms | 0%, 105 µs |
+
+- Vert.x 5 is back to the Vert.x 4.5 values: without stealing, 111–120 µs per request against 105–108 µs,
+  instead of 240–280 µs with Netty 4.2.19 on this machine.
+- It steals as much as Vert.x 4.5 (68% at 4000 requests/s); with Netty 4.2.19 it stole less (56%).
+- **Stealing costs relatively more than with Vert.x 4.5**: 26% more CPU per request at 2000 requests/s and 45% at 4000
+  (Vert.x 4.5: 20% and 33%), so 29 and 50 µs per request instead of 22 and 35 µs.
+  This is the gap with `shared` that `NETTY_SELECT_ROUNDING.md` notes and doesn't explain yet.
+- The policies compare like with Vert.x 4.5: `preferLocalWait` keeps most of the gain of `perEventLoop`
+  (123 µs against 111 µs at 4000 requests/s, 11% stolen).
+- The latency is the same as with Vert.x 4.5. The p99 of 25 ms of Vert.x 4.5 with `alwaysActive` at 4000 requests/s
+  (not in the table) happened in one run only.
 
 ## 12. Waiting for a local connection inside the Vert.x pool
 

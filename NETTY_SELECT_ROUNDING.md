@@ -2,7 +2,8 @@
 
 `VERTX5_CPU_PROFILE.md` found that Vert.x 5 uses 2–3 times the event loop CPU of Vert.x 4.5.
 The cause is in Netty's `NioIoHandler`. This document has the status of the fix, the measurements with the real fix,
-and the drafts of the Netty issue, the Netty pull request and a note for Vert.x. **Nothing was posted or pushed.**
+and the drafts of the Netty issue, the Netty pull request and a note for Vert.x.
+**The fix is released in Netty 4.2.20.Final**: section 9 has the measurements with the release.
 
 ## 1. Status
 
@@ -16,10 +17,11 @@ and the drafts of the Netty issue, the Netty pull request and a note for Vert.x.
 | Tests: rounding and no busy spin, both fail without the fix | done |
 | `transport` module tests, checkstyle | done: 423 run, 0 failures, 9 skipped |
 | Effect measured with the built Netty (Netty-only, Vert.x-only, Hibernate Reactive) | done (section 4) |
-| Netty issue | **draft only, not filed** (section 6) |
-| Netty pull request | **not opened**, draft only (section 7) |
-| Vert.x issue/discussion | **draft only, not posted** (section 8) |
-| ICLA | **not signed** (section 3) |
+| Netty issue | filed: [netty/netty#18137](https://github.com/netty/netty/issues/18137) (still open after the merge) |
+| Netty pull request | [netty/netty#18138](https://github.com/netty/netty/pull/18138), merged into `4.2` on 2026-10-28, ported to `5.0` by #18141 |
+| Netty release | **4.2.20.Final**, 2026-11-02 |
+| Effect measured with Netty 4.2.20.Final | done (section 9) |
+| Vert.x | `vertx-dependencies` uses 4.2.20.Final on `master` and `5.2` (next 5.2 release), `5.1` still has 4.2.19. Vert.x 5.2.2 is the latest release, with 4.2.19. The note of section 8 wasn't posted |
 | Not done | the `testsuite` module (socket/transport suites), the native modules (epoll, kqueue, io_uring: no native toolchain was used), a build on JDK 8–21, the 5.0 branch |
 
 ## 2. The fix, what blame showed
@@ -378,3 +380,78 @@ Applications that don't use the NIO transport are not affected: **workaround**: 
 
 Ask: bump Netty in Vert.x 5.x once a fixed 4.2.x is released, and maybe mention the workaround in the docs (Vert.x 5 migration notes /
 performance notes) until then. The reproducer and the profiles are available.
+
+## 9. Netty 4.2.20.Final
+
+Rerun on 2026-11-03 with the released Netty, on one machine for all the stacks
+(AMD Ryzen 9 7950X3D, JDK 25.0.4, JVM pinned to CPUs 8–15, PostgreSQL 18 in a container limited to 3 CPUs).
+Vert.x 5.2.2 still uses Netty 4.2.19, so the Vert.x 5 stacks are built with Vert.x 5.1.10 and all the Netty modules
+replaced by 4.2.20.Final (`-PnettyVersion=4.2.20.Final`, see `reactive-openloop/build.gradle`).
+The release has the fix: `NioIoHandler` adds `995000` (4.2.19: `500000`).
+Each value is the average of 2 runs of 20 s, the range in parentheses.
+
+### Netty only (`profile/NettyTimerSpin.java`, 2 runs each, same results within 1%)
+
+| Tasks/s submitted | Netty 4.1.139 | Netty 4.2.19 | Netty 4.2.20.Final |
+|---|---|---|---|
+| 0 | 0.3% | 0.3% | 0.3% |
+| 1000 | 0.5% | **10.4%** | 0.6–0.7% |
+| 4000 | 1.1% | **28.0%** | 1.6–1.7% |
+| 10000 | 2.0% | **40.9%** | 3.1% |
+
+Timer lateness at 4000 tasks/s: 4.1 mean 227 µs, p99 893–905; 4.2.19 mean 25, p99 416–420; 4.2.20 mean 225, p99 891–900.
+These are the same as with the snapshot in section 4.
+
+### Vert.x only (`vertx-repro`, 4000 requests/s, 4 event loops, pool of 4)
+
+| Case | Vert.x 4.5.35 | Vert.x 5.1.10, Netty 4.2.19 | Vert.x 5.1.10, Netty 4.2.20 |
+|---|---|---|---|
+| `perEventLoop`, cache off | 81 µs (80–83) | **235 µs** (227–243) | 87 µs (86–88) |
+| `perEventLoop`, cache on | 39 µs (39–40) | **64 µs** (64–65) | 40 µs (40–41) |
+| `shared`, cache off | 122 µs (114–129) | **321 µs** (318–324) | 132 µs (131–133) |
+| `shared`, cache on | 66 µs (65–68) | **145 µs** (144–145) | 78 µs (78–78) |
+
+### Hibernate Reactive benchmark (4000 requests/s, 4 event loops, pool of 4)
+
+Hibernate Reactive 3.4.6 with Vert.x 4.5.35, and Hibernate Reactive 4.5.11 with Vert.x 5.1.10:
+
+| Case | Vert.x 4.5 | Vert.x 5, Netty 4.2.19 | Vert.x 5, Netty 4.2.20 |
+|---|---|---|---|
+| `perEventLoop`, cache off | 107 µs (105–108), 10.4 sleeps, p50 1617 µs | **283 µs** (278–288), 7.5, 1409 µs | 112 µs (111–112), 10.4, 1654 µs |
+| `perEventLoop`, cache on | 60 µs (59–61), 5.7, 986 µs | **99 µs** (98–99), 5.4, 936 µs | 61 µs (61–61), 5.7, 994 µs |
+| `shared`, cache off | 141 µs (141–142), 67% stolen | **372 µs** (364–380), 57% stolen | 158 µs (157–159), 68% stolen |
+| `shared`, cache on | 88 µs (87–88), 57% stolen | **180 µs** (178–181), 51% stolen | 99 µs (99–99), 58% stolen |
+
+- **The release does what the snapshot did**: Vert.x 5 uses about the same event loop CPU as Vert.x 4.5,
+  2.5 times less than with Netty 4.2.19. With one pool per event loop it's 2–7% above Vert.x 4.5.
+- **The gap with stealing remains**: with `shared`, Vert.x 5 still uses 10–17 µs more per request than Vert.x 4.5
+  (12% in the benchmark, 8–18% in the Vert.x only reproducer). It was there with the snapshot too and it's still not explained.
+- With the fix, Vert.x 5 steals as many connections as Vert.x 4.5 (68% against 67%). With Netty 4.2.19 it stole fewer (57%):
+  the busy loop changes the timing of the event loops.
+- The latency is back to the Vert.x 4.5 values (median 1.65 ms against 1.62 ms, with Netty 4.2.19 1.41 ms):
+  the timers of the load generator run up to 1 ms late again, see "The latency side effect" in section 4.
+
+### Until Vert.x ships it
+
+Vert.x 5.2.2 and earlier bring Netty 4.2.19. An application on the NIO transport can import the Netty BOM before the Vert.x one:
+
+```xml
+<dependency>
+    <groupId>io.netty</groupId>
+    <artifactId>netty-bom</artifactId>
+    <version>4.2.20.Final</version>
+    <type>pom</type>
+    <scope>import</scope>
+</dependency>
+```
+
+or in Gradle `implementation enforcedPlatform( "io.netty:netty-bom:4.2.20.Final" )`.
+The native transports (epoll, io_uring) were never affected.
+
+Re-run (PostgreSQL: `./start_pg.sh`; the installs as in section 5, the third one with `-Pstack=vertx5 -PnettyVersion=4.2.20.Final`
+copied to `install-vertx5n` and `repro-vertx5n`):
+
+```
+INSTALL_DIR=/tmp/profile OUT=/tmp/profile/out EVENT=none profile/run_netty_release.sh
+python3 profile/summarize.py /tmp/profile/out repro- hr- steal-
+```

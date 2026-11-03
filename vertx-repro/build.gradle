@@ -6,8 +6,10 @@ plugins {
 // Vert.x only (no Hibernate): the load of OpenLoopStealBenchmark as plain prepared queries, see VertxCpuRepro.
 // Select the version with -Pstack=vertx5 (Vert.x 5.1.10), the default is Vert.x 4.5.35.
 // -PvertxVersion=5.2.2 selects any other version of the Vert.x PostgreSQL client.
+// -PnettyVersion=4.2.20.Final replaces the version of all the Netty modules.
 def stack = project.findProperty("stack")
 def vertxVersion = project.findProperty("vertxVersion")
+def nettyVersion = project.findProperty("nettyVersion")
 
 dependencies {
     if ( vertxVersion != null ) {
@@ -18,6 +20,9 @@ dependencies {
     }
     else {
         implementation 'io.vertx:vertx-pg-client:4.5.35'
+    }
+    if ( nettyVersion != null ) {
+        implementation enforcedPlatform( "io.netty:netty-bom:${nettyVersion}" )
     }
     runtimeOnly 'com.ongres.scram:scram-client:3.2'
 }
