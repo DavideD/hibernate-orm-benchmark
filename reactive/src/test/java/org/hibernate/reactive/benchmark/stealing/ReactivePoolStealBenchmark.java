@@ -49,9 +49,14 @@ public class ReactivePoolStealBenchmark {
 	int poolEventLoopSize;
 
 	// shared = one pool for all the event loops (like Quarkus),
-	// perEventLoop = one pool per event loop with poolSize / eventLoopCount connections each (ignores poolEventLoopSize)
+	// perEventLoop = one pool per event loop with poolSize / eventLoopCount connections each (ignores poolEventLoopSize),
+	// always, alwaysActive, preferLocalWait, never = StealPolicyPool with that policy (ignores poolEventLoopSize)
 	@Param({"shared"})
 	String poolType;
+
+	// How long preferLocalWait waits for a connection of the same event loop
+	@Param({"1"})
+	long localWaitMs;
 
 	private ReactiveSetup setup;
 	private final AtomicInteger verticleIndex = new AtomicInteger();
@@ -59,7 +64,7 @@ public class ReactivePoolStealBenchmark {
 
 	@Setup(Level.Trial)
 	public void setup() {
-		setup = new ReactiveSetup( eventLoopCount, poolType, poolSize, poolEventLoopSize );
+		setup = new ReactiveSetup( eventLoopCount, poolType, poolSize, poolEventLoopSize, localWaitMs );
 		deployVerticles();
 	}
 
@@ -231,6 +236,7 @@ public class ReactivePoolStealBenchmark {
 		bench.sleepMs = 0;
 		bench.poolSize = 2;
 		bench.poolType = "shared";
+		bench.localWaitMs = 1;
 		bench.setup();
 
 		try {

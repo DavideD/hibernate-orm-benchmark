@@ -73,6 +73,13 @@ final class StealCounter {
 		return previous;
 	}
 
+	/**
+	 * @return the pool behind the proxy
+	 */
+	Pool delegate() {
+		return delegate;
+	}
+
 	private Future<SqlConnection> track(Future<SqlConnection> future) {
 		EventLoop callerLoop = VertxInternals.currentEventLoop();
 		if ( callerLoop == null ) {
