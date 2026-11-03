@@ -74,6 +74,8 @@ public final class OpenLoopStealBenchmark {
 		// Count the acquisitions that miss a connection of their event loop because its release is still in the
 		// queue of the pool (shared and releasesFirst only, see AffinityProbe). It adds some work to the pool.
 		DEFAULTS.put( "probe", "false" );
+		// Let the Vert.x PostgreSQL client cache the prepared statements (off by default, like the earlier results)
+		DEFAULTS.put( "cachePreparedStatements", "false" );
 	}
 
 	public static void main(String[] args) throws Exception {
@@ -98,6 +100,7 @@ public final class OpenLoopStealBenchmark {
 		long durationSeconds = Long.parseLong( options.get( "durationSeconds" ) );
 		long seed = Long.parseLong( options.get( "seed" ) );
 		boolean probe = Boolean.parseBoolean( options.get( "probe" ) );
+		boolean cachePreparedStatements = Boolean.parseBoolean( options.get( "cachePreparedStatements" ) );
 		if ( probe && !"shared".equals( poolType ) && !"releasesFirst".equals( poolType ) ) {
 			throw new IllegalArgumentException( "probe only works with poolType=shared or releasesFirst" );
 		}
@@ -114,7 +117,7 @@ public final class OpenLoopStealBenchmark {
 		var localWait = new LocalWaitConfig( Long.parseLong( options.get( "localWaitUs" ) ), Integer.parseInt( options.get( "localWaitDepth" ) ),
 				Boolean.parseBoolean( options.get( "creationAffinity" ) ), new LocalWaitStats() );
 		var setup = new ReactiveSetup( eventLoops, poolType, poolSize, poolEventLoopSize, localWaitMs, localWait,
-				Boolean.parseBoolean( options.get( "nativeTransport" ) ) );
+				Boolean.parseBoolean( options.get( "nativeTransport" ) ), cachePreparedStatements );
 		try {
 			if ( setup.vertx.isNativeTransportEnabled() != Boolean.parseBoolean( options.get( "nativeTransport" ) ) ) {
 				throw new IllegalStateException( "nativeTransport=" + options.get( "nativeTransport" ) + ", but Vert.x uses "

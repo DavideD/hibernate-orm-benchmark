@@ -69,6 +69,8 @@ include(':hibernate-orm-benchmark-basic')
 project(":hibernate-orm-benchmark-basic").projectDir = file('basic')
 include(':hibernate-orm-benchmark-reactive-openloop')
 project(":hibernate-orm-benchmark-reactive-openloop").projectDir = file('reactive-openloop')
+include(':hibernate-orm-benchmark-vertx-repro')
+project(":hibernate-orm-benchmark-vertx-repro").projectDir = file('vertx-repro')
 // It needs the ORM version of Hibernate Reactive 4.5: only with -Pstack=vertx5, so that the other stacks still build
 if ( providers.gradleProperty( 'stack' ).getOrNull() == 'vertx5' ) {
     include(':hibernate-orm-benchmark-orm-vs-reactive')

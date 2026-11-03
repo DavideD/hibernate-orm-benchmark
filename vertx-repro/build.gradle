@@ -1,0 +1,29 @@
+plugins {
+    id 'org.hibernate.orm.java-conventions'
+    id 'application'
+}
+
+// Vert.x only (no Hibernate): the load of OpenLoopStealBenchmark as plain prepared queries, see VertxCpuRepro.
+// Select the version with -Pstack=vertx5 (Vert.x 5.1.10), the default is Vert.x 4.5.35.
+// -PvertxVersion=5.2.2 selects any other version of the Vert.x PostgreSQL client.
+def stack = project.findProperty("stack")
+def vertxVersion = project.findProperty("vertxVersion")
+
+dependencies {
+    if ( vertxVersion != null ) {
+        implementation "io.vertx:vertx-pg-client:${vertxVersion}"
+    }
+    else if ( "vertx5" == stack ) {
+        implementation 'io.vertx:vertx-pg-client:5.1.10'
+    }
+    else {
+        implementation 'io.vertx:vertx-pg-client:4.5.35'
+    }
+    runtimeOnly 'com.ongres.scram:scram-client:3.2'
+}
+
+description = 'hibernate-orm-benchmark-vertx-repro'
+
+application {
+    mainClass = 'org.hibernate.reactive.benchmark.repro.VertxCpuRepro'
+}

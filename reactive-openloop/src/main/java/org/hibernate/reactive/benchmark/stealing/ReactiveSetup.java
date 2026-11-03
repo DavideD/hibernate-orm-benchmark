@@ -39,7 +39,6 @@ public final class ReactiveSetup {
 	 * @param countSteals count the stolen connections ({@link StealCounter}), which costs a little CPU for each session
 	 */
 	public record ClientOptions(boolean cachePreparedStatements, int pipeliningLimit, boolean countSteals) {
-		static final ClientOptions STEAL_BENCHMARK = new ClientOptions( false, 0, true );
 	}
 
 	final Vertx vertx;
@@ -68,10 +67,12 @@ public final class ReactiveSetup {
 	 * @param localWait the settings of {@code localWait}, a shared pool that waits for a connection of the same
 	 * event loop ({@code LocalWaitPool})
 	 * @param nativeTransport use the native epoll transport instead of NIO, if it's on the classpath ({@code -Pepoll})
+	 * @param cachePreparedStatements whether the Vert.x PostgreSQL client caches the prepared statements
 	 */
 	ReactiveSetup(int eventLoopCount, String poolType, int poolSize, int poolEventLoopSize, long localWaitMs, LocalWaitConfig localWait,
-			boolean nativeTransport) {
-		this( eventLoopCount, poolType, poolSize, poolEventLoopSize, localWaitMs, localWait, nativeTransport, ClientOptions.STEAL_BENCHMARK );
+			boolean nativeTransport, boolean cachePreparedStatements) {
+		this( eventLoopCount, poolType, poolSize, poolEventLoopSize, localWaitMs, localWait, nativeTransport,
+				new ClientOptions( cachePreparedStatements, 0, true ) );
 	}
 
 	/**

@@ -11,7 +11,7 @@
 #   ./run_OpenLoopSteal.sh poolSize=8 weights=4,2,1,1 queriesPerSession=10
 #
 # Options and defaults: eventLoops=4 poolSize=16 poolEventLoopSize=4 weights=1,1,1,1 queriesPerSession=5
-#                       warmupSeconds=10 durationSeconds=20 seed=42
+#                       warmupSeconds=10 durationSeconds=20 seed=42 cachePreparedStatements=false
 #                       localWaitMs=1 (preferLocalWait) localWaitUs=1000 localWaitDepth=0 creationAffinity=true (localWait)
 #                       nativeTransport=false (true needs EPOLL)
 #
