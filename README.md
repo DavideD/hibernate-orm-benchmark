@@ -1,3 +1,14 @@
+## Connection stealing benchmarks
+
+The benchmarks about connection stealing in the Vert.x SQL client pool and the CPU use of Vert.x 5,
+with their results:
+
+- [`POOL_STEALING.md`](POOL_STEALING.md): connection stealing, the open loop benchmark (`reactive-openloop`, `run_OpenLoopSteal.sh`),
+  the steal policies and the `localWait` pool
+- [`ORM_VS_REACTIVE.md`](ORM_VS_REACTIVE.md): Hibernate ORM against Hibernate Reactive (`orm-vs-reactive`, `run_OrmVsReactive.sh`)
+- [`VERTX5_CPU_PROFILE.md`](VERTX5_CPU_PROFILE.md) and [`NETTY_SELECT_ROUNDING.md`](NETTY_SELECT_ROUNDING.md): why Vert.x 5 used more CPU, and the Netty fix (`profile/`, `vertx-repro`)
+- [`CONNECTION_STEALING_SUMMARY.md`](CONNECTION_STEALING_SUMMARY.md): a summary of all of them
+
 ## How to run a specific JMH benchmark attaching async-profiler?
 
 Install https://github.com/async-profiler/async-profiler/releases/tag/v3.0
