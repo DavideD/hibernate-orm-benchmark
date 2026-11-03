@@ -83,6 +83,7 @@ fi
 
 # --- Benchmark ---
 results=$(mktemp)
+run_log=$(mktemp)
 for rate in $RATES; do
 	for poolType in $POOL_TYPES; do
 		for (( i = 1; i <= REPEAT; i++ )); do
@@ -90,7 +91,9 @@ for rate in $RATES; do
 			echo "=========================================="
 			echo "  rate=$rate poolType=$poolType $* (run $i/$REPEAT)"
 			echo "=========================================="
-			"$BIN" "rate=$rate" "poolType=$poolType" "$@" | tee /dev/stderr | grep '^RESULT' >> "$results"
+			# Not tee /dev/stderr: when the output goes to a file, tee would reopen it and truncate it
+			"$BIN" "rate=$rate" "poolType=$poolType" "$@" 2>&1 | tee "$run_log"
+			grep '^RESULT' "$run_log" >> "$results" || true
 		done
 	done
 done 2>&1
@@ -129,4 +132,4 @@ if grep -q 'missedPct=' "$results"; then
 		cat
 	}
 fi
-rm -f "$results"
+rm -f "$results" "$run_log"
