@@ -10,7 +10,7 @@ and Reactive wins by a wide margin only when the threads you can afford are far 
 
 Sections 4 to 8 ran Reactive with Netty 4.2.19, whose NIO event loop busy-polls (`NETTY_SELECT_ROUNDING.md`).
 Section 12 runs it again with the fix of Netty 4.2.20.Final: Reactive on NIO is then about as cheap as on epoll,
-and the conclusions don't change otherwise.
+and the conclusions don't change otherwise. Section 13 explains why virtual threads were slower, and how to avoid it.
 
 ## 1. What was compared
 
@@ -462,7 +462,7 @@ rejects a request, so a system that can't keep up piles up virtual threads (and 
 ## 9. Conclusions
 
 (With Netty 4.2.19. With Netty 4.2.20.Final, section 12, the CPU saving of Reactive is on NIO too, 6–23% less than the ORM,
-and the rest holds.)
+and the rest holds. Section 13 shows that virtual threads match or beat platform threads with a pool of virtual threads.)
 
 Hibernate Reactive was **faster than Hibernate ORM** in these cases:
 
@@ -525,6 +525,9 @@ CONFIGS="reactive:shared:epoll reactive:shared:epoll:pipe1" ./run_OrmVsReactive.
 NETTY=4.2.20.Final MODE=fixed RATE=9000 CPUS=2 POOL_SIZES=8 REPEAT=3 \
   CONFIGS="orm:platform reactive:shared reactive:shared:epoll reactive:localWait reactive:localWait:epoll reactive:perEventLoop reactive:perEventLoop:epoll" \
   ./run_OrmVsReactive.sh                # section 12, one of the regimes
+CONFIGS="orm:platform orm:virtual orm:virtualPool" CPUS=2 POOL_SIZES=8 REPEAT=2 ./run_OrmVsReactive.sh   # section 13
+JAVA_OPTS="-Xms1g -Xmx1g -Djdk.virtualThreadScheduler.parallelism=4" CONFIGS=orm:virtualPool CPUS=2 POOL_SIZES=8 ./run_OrmVsReactive.sh
+profile/virtual-threads/profile_orm.sh  # section 13, the recordings of VIRTUAL_THREADS_PROFILE.md
 ```
 
 Gradle 8.4 of the wrapper can't run on JDK 25: the runs used `GRADLE=gradle` (9.4.1) with `JAVA_HOME=/usr/lib/jvm/java-25-openjdk`.
@@ -652,3 +655,95 @@ because of the 1 ms granularity of the generators.
 - **The pool still matters:** `perEventLoop` on NIO is at 19.2–21.4k with 8 connections and 2 cores, and 39.6k with 32 connections
   and 4 cores.
 
+## 13. Why virtual threads were slower
+
+Section 4 left open why the ORM sessions on virtual threads sustain only 55–85% of the rate of platform threads
+(18–21k against 32k with 2 cores and 8 connections), while using no more CPU, and why they cost almost twice as much CPU
+when the load is low and the database slow. This section profiles them and tests what changes the result.
+JDK 25.0.4 defaults: the read pollers are virtual threads (`jdk.pollerMode=2`, a "master" platform poller wakes them),
+2 read pollers and 2 carriers with 2 cores. The runs are on Netty 4.2.20.Final, which doesn't matter for the ORM.
+
+`executor=virtualPool` is new: a `ThreadPoolExecutor` of `threads` virtual threads (by default one per connection),
+so that the sessions wait in the queue of the executor, like with platform threads, instead of all starting at once
+and waiting for a connection in Agroal (`orm:virtualPool` in `run_OrmVsReactive.sh`).
+
+#### Measurements
+
+**2 cores, pool 8, DB latency 0 ms, 15000 sessions/s, 2 runs each**
+
+| Configuration | Process CPU/session (µs) | JVM CPUs busy/session (µs) | p50 (ms) | p99 (ms) | p99.9 (ms) |
+|---|---|---|---|---|---|
+| ORM, platform threads | 50 | 67 | 0.94 | 1.4–1.5 | 6.5–6.7 |
+| ORM, a virtual thread for each session | 50 | 62–63 | 1.00–1.01 | 2.2–3.1 | 6.6–9.8 |
+| ORM, a pool of 8 virtual threads | 41–42 | 58 | 0.84–0.85 | 1.4–1.6 | 7.6–8.6 |
+
+`perf stat` on the JVM for 18 s (one run each): 5.6 context switches per session for the platform threads, 2.9 for a virtual thread each.
+
+**2 cores, pool 8, DB latency 1 ms, 1500 sessions/s, 2 runs each**
+
+| Configuration | Process CPU/session (µs) | JVM CPUs busy/session (µs) | p50 (ms) | p99 (ms) |
+|---|---|---|---|---|
+| ORM, platform threads | 68–69 | 95–114 | 2.79–2.80 | 3.4–3.5 |
+| ORM, a virtual thread for each session | 116–117 | 129–135 | 2.84 | 3.6 |
+| ORM, a pool of 8 virtual threads | 114 | 122–130 | 2.84 | 3.5–3.7 |
+
+`perf stat`: 7.7 context switches per session for platform threads, 12.6 for virtual threads.
+
+**Maximum sustainable rate, 2 cores, pool 8, no delay, 2 runs each** (thousands of sessions/s)
+
+| Configuration | Max rate | Busy cores of 2 | JVM CPUs busy/session (µs) |
+|---|---|---|---|
+| ORM, platform threads | 32.0–32.8 | 1.91–1.98 | 60 |
+| A virtual thread each (default) | 18.7–19.8 | 1.10–1.17 | 59–60 |
+| A virtual thread each, `-Djdk.pollerMode=1` | 16.7 | 1.24–1.28 | 74–76 |
+| A virtual thread each, `-Djdk.virtualThreadScheduler.parallelism=4` | 25.1–26.4 | 1.72–1.82 | 69 |
+| A virtual thread each, both | 20.8–22.4 | 1.70–1.80 | 81–82 |
+| A pool of 8 virtual threads | 24.0–25.6 | 1.27–1.29 | 50–53 |
+| A pool of 8 virtual threads, `pollerMode=1` | 21.9–23.0 | 1.36–1.42 | 62 |
+| A pool of 8 virtual threads, `parallelism=4` | **37.6–39.6** | 1.90–1.96 | 49–50 |
+
+**Maximum sustainable rate, 4 cores, pool 32, no delay, 2 runs each**
+
+| Configuration | Max rate | Busy cores of 4 | JVM CPUs busy/session (µs) |
+|---|---|---|---|
+| ORM, platform threads | 59.5–61.3 | 3.85–3.93 | 64–65 |
+| A virtual thread each | 48.1–49.3 | 2.64–2.77 | 55–56 |
+| A pool of 32 virtual threads | 56.5–66.7 | 3.05–3.26 | 49–54 |
+
+The profiles: async-profiler (`cpu` and `wall`) and the JDK's Flight Recorder at 15000/s and at 1500/s with 1 ms, for platform
+and virtual threads, analysed with the Jafar MCP server, `jfrconv` and `jfr`. The details are in `VIRTUAL_THREADS_PROFILE.md`.
+
+#### What it shows
+
+- **Virtual threads don't cost more CPU when the CPUs are busy.** At 15000/s a virtual thread each uses the same process CPU
+  as platform threads, and a pool of virtual threads 17% less (41–42 µs against 50). They save the blocking `poll()` that a platform
+  thread does after an empty read (15.5 µs per session in the profile) and half the context switches, and add back the
+  `epoll_ctl` registrations, the poller virtual threads, park and unpark, and the scheduler's timer thread (about 15 µs).
+- **They hit the p99 limit with idle CPUs.** A virtual thread each stops at 1.1–1.2 busy cores of 2. The connections are the limit:
+  8 connections at 32.8k sessions/s means that a session holds one for about 244 µs, at 18.7k for about 428 µs. The extra time
+  is waiting, not CPU: the JFR `jdk.SocketRead` p99 is 0.75 ms with virtual threads against 0.105 ms with platform threads (same p50).
+- **Half of it is Agroal with one virtual thread per session.** With platform threads, 8 threads hold the 8 connections and the
+  sessions wait in the executor's queue: nobody ever waits in Agroal, and its thread-local cache always hits. With a virtual thread
+  each, all the sessions start and wait in Agroal: its cache always misses, and each wait is a timed park, which schedules and
+  cancels a timer in the scheduler's `delayScheduler` thread (82% of the 571k `jdk.ThreadPark` events at 15000/s). A pool of
+  8 virtual threads removes that: 24.0–25.6k instead of 18.7–19.8k, and the latency of platform threads at 15000/s.
+- **The other half is the carriers.** With 2 carriers on 2 cores, the pool of virtual threads still stops at 1.3 busy cores.
+  With 4 carriers (`parallelism=4`) it reaches 37.6–39.6k at 1.9–2.0 busy cores, 15–24% more than platform threads with 17–18%
+  less CPU per session. Platform threads have 8 kernel threads for 2 cores here; virtual threads only 2, so any time a carrier
+  doesn't run (preempted by another thread, blocked in the kernel) the virtual threads behind it wait. The recordings have no
+  scheduler events, so the exact cause is inferred. With 4 cores and 32 connections the default carriers are enough:
+  the pool of 32 virtual threads reaches 56.5–66.7k against 59.5–61.3k for platform threads.
+- **The dedicated poller threads are worse** (`jdk.pollerMode=1`): one more thread to wake up for each response.
+- **At a low load with a slow database, virtual threads cost 70% more CPU, pool or not** (114–117 µs against 68–69):
+  each database response wakes the master poller, which wakes a carrier for the poller virtual thread, which unparks the
+  session's virtual thread (2 wake-ups of sleeping threads instead of 1), and each carrier spins before it parks.
+  It is the I/O path of virtual threads in JDK 25, not Agroal.
+
+In short, to get the rate of platform threads, or more, with virtual threads in this setup: don't start a virtual thread for each
+request when the connection pool is small, keep the concurrency at about the number of connections (a pool of virtual
+threads, or a semaphore), and with few cores have more carriers than cores. Virtual threads then use less CPU than platform
+threads under load, and more when the system is mostly idle.
+
+Not covered: HikariCP (it might wait for a connection differently), a pool of virtual threads with more carriers on 4 cores,
+other JDK versions. One profiled run with the Flight Recorder stalled for 1 s while sessions waited in Agroal
+(`VIRTUAL_THREADS_PROFILE.md`, 2.3); it happened only in that run, and its cause is a hypothesis.

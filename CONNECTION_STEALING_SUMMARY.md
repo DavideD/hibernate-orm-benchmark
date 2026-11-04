@@ -98,9 +98,13 @@ cores and PostgreSQL on other cores.
 - **Reactive is sensitive to its configuration:** with Netty 4.2.19, NIO instead of epoll costs 10–40% more CPU, no statement cache about
   70% more, `perEventLoop` with 32 connections drops to 38–45k, and twice as many event loops as cores hurts `shared`
   by 4–24%.
-- **Virtual threads were disappointing:** 55–85% of the platform-thread rate at high load, and the most expensive
-  option at low rate with a DB delay (120–125 µs against 66–72 µs per session). The cause wasn't found, and tuning was
-  minimal.
+- **Virtual threads aren't slower per se:** at high load they cost no extra CPU. The low maximum rate is latency:
+  one virtual thread per session makes the sessions queue in Agroal (a fixed pool of virtual threads, `virtualPool`,
+  gets 24.0–25.6k against 18.7–19.8k), and the default scheduler has too few carriers for the blocking round trips.
+  `virtualPool` with `-Djdk.virtualThreadScheduler.parallelism=4` reaches 37.6–39.6k against 32.0–32.8k for platform
+  threads, with 17–18% less CPU (2 cores, pool 8). At a low rate with a DB delay they still cost about 70% more CPU
+  (two wake-ups per round trip). Section 13 of [`ORM_VS_REACTIVE.md`](ORM_VS_REACTIVE.md) and
+  [`VIRTUAL_THREADS_PROFILE.md`](VIRTUAL_THREADS_PROFILE.md) have the profiles.
 - **Pipelining had no effect,** as expected: Reactive keeps the connection for the session and sends one statement at
   a time.
 - With 2 cores, ORM has the better p99.9 (3.1–5.7 ms against 4.3–13.9 ms for Reactive on epoll); with 4 cores they're
@@ -112,6 +116,7 @@ cores and PostgreSQL on other cores.
 <summary>Commits and how to run</summary>
 
 - 91fce95 Compare Hibernate ORM with Hibernate Reactive
+- cf87146 Add a virtualPool executor to OrmVsReactiveBenchmark
 - 266b506 Add a NETTY option to run_OrmVsReactive.sh
 
 ```
@@ -120,6 +125,8 @@ cores and PostgreSQL on other cores.
 GRADLE=gradle JAVA_HOME=/usr/lib/jvm/java-25-openjdk ./run_OrmVsReactive.sh ...
 # Replace the Netty of Vert.x
 NETTY=4.2.20.Final ./run_OrmVsReactive.sh ...
+# The async-profiler and JFR recordings of the virtual threads
+profile/virtual-threads/profile_orm.sh
 ```
 
 </details>
