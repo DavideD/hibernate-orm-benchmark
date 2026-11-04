@@ -40,9 +40,10 @@ public final class OrmVsReactiveBenchmark {
 	static {
 		// orm: blocking Session + pgjdbc + Agroal, reactive: Hibernate Reactive + the Vert.x PostgreSQL client
 		DEFAULTS.put( "engine", "reactive" );
-		// orm: platform (a fixed pool of `threads` platform threads) or virtual (a virtual thread for each request)
+		// orm: platform (a fixed pool of `threads` platform threads), virtual (a virtual thread for each request)
+		// or virtualPool (a fixed pool of `threads` virtual threads)
 		DEFAULTS.put( "executor", "platform" );
-		// orm, platform executor: size of the thread pool (0 = poolSize)
+		// orm, platform and virtualPool executors: size of the thread pool (0 = poolSize)
 		DEFAULTS.put( "threads", "0" );
 		// reactive: shared, localWait or perEventLoop
 		DEFAULTS.put( "poolType", "shared" );

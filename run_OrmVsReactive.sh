@@ -19,6 +19,7 @@
 #   CONFIGS       What to run (default: "orm:platform orm:virtual reactive:shared reactive:localWait reactive:perEventLoop").
 #                 orm:platform[:THREADS]  blocking sessions on a fixed pool of platform threads (default POOL_SIZE threads)
 #                 orm:virtual             blocking sessions on virtual threads
+#                 orm:virtualPool[:THREADS]  blocking sessions on a fixed pool of virtual threads (default POOL_SIZE threads)
 #                 reactive:POOL[:epoll][:pipeN]  Hibernate Reactive with the pool shared, localWait or perEventLoop,
 #                                         on NIO or epoll, with PgConnectOptions#setPipeliningLimit(N)
 #   CPUS          CPU budgets of the JVM, in cores (default: "4"). The JVM gets the CPUs JVM_FIRST.. JVM_FIRST+N-1
@@ -44,7 +45,7 @@
 set -e
 
 if [[ "$1" == "-h" || "$1" == "--help" ]]; then
-	sed -n '3,42p' "$0" | sed 's/^# \{0,1\}//'
+	sed -n '3,43p' "$0" | sed 's/^# \{0,1\}//'
 	exit 0
 fi
 
@@ -132,6 +133,7 @@ config_options() {
 			case "$2" in
 				platform) echo "engine=orm executor=platform threads=${3:-$pool_size}" ;;
 				virtual) echo "engine=orm executor=virtual" ;;
+				virtualPool) echo "engine=orm executor=virtualPool threads=${3:-$pool_size}" ;;
 				*) echo "ERROR: unknown ORM configuration $config" >&2; return 1 ;;
 			esac
 			;;

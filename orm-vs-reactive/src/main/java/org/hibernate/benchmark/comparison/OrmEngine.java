@@ -31,7 +31,7 @@ import org.HdrHistogram.Recorder;
  * Hibernate ORM with blocking JDBC (pgjdbc) and an Agroal pool. A scheduler thread submits the requests to an executor
  * at the scheduled times, the same random times as {@code LoadVerticle} (Poisson arrivals, at most every 1 ms),
  * and a thread of the executor runs each request: a session with the same statements as the reactive one.
- * The executor is a fixed pool of platform threads, or a virtual thread for each request.
+ * The executor is a fixed pool of platform threads, a virtual thread for each request, or a fixed pool of virtual threads.
  */
 final class OrmEngine implements LoadEngine {
 
@@ -59,7 +59,9 @@ final class OrmEngine implements LoadEngine {
 
 	/**
 	 * @param executorType {@code platform} for a fixed pool of {@code threads} platform threads,
-	 * or {@code virtual} for a virtual thread for each request
+	 * {@code virtual} for a virtual thread for each request,
+	 * or {@code virtualPool} for a fixed pool of {@code threads} virtual threads (the requests wait in its queue,
+	 * like with {@code platform}, instead of all starting and waiting for a connection in the Agroal pool)
 	 */
 	OrmEngine(int poolSize, String executorType, int threads, int queriesPerSession, double dbSleepMs, boolean preparedStatements, long seed) {
 		this.queriesPerSession = queriesPerSession;
@@ -97,7 +99,13 @@ final class OrmEngine implements LoadEngine {
 				yield pool;
 			}
 			case "virtual" -> Executors.newThreadPerTaskExecutor( Thread.ofVirtual().name( "request-", 0 ).factory() );
-			default -> throw new IllegalArgumentException( "Unknown executor: " + executorType + " (valid: platform, virtual)" );
+			case "virtualPool" -> {
+				var pool = new ThreadPoolExecutor( threads, threads, 0, TimeUnit.MILLISECONDS, new LinkedBlockingQueue<>(),
+						Thread.ofVirtual().name( "request-", 0 ).factory() );
+				pool.prestartAllCoreThreads();
+				yield pool;
+			}
+			default -> throw new IllegalArgumentException( "Unknown executor: " + executorType + " (valid: platform, virtual, virtualPool)" );
 		};
 		scheduler = new Thread( () -> schedule( seed ), "load-scheduler" );
 		scheduler.setDaemon( true );
