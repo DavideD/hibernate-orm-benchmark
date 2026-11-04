@@ -38,14 +38,15 @@
 #   GRADLE        Gradle command (default: ./gradlew)
 #   JAVA_OPTS     JVM options of the benchmark (default: -Xms1g -Xmx1g)
 #   PODMAN        Container command (default: podman, or "sudo podman" if rootless podman doesn't work)
-#   EPOLL         Netty version of the native epoll transport for the :epoll configurations (default: 4.2.19.Final)
+#   NETTY         Netty version of all the Netty modules, e.g. 4.2.20.Final (default: the one Vert.x brings)
+#   EPOLL         Netty version of the native epoll transport for the :epoll configurations (default: NETTY, or 4.2.19.Final)
 #   SKIP_BUILD    Set to true to reuse the previous build
 #   STOP_DB       Set to true to stop the database when the benchmark ends
 
 set -e
 
 if [[ "$1" == "-h" || "$1" == "--help" ]]; then
-	sed -n '3,43p' "$0" | sed 's/^# \{0,1\}//'
+	sed -n '3,44p' "$0" | sed 's/^# \{0,1\}//'
 	exit 0
 fi
 
@@ -63,7 +64,7 @@ JVM_FIRST=${JVM_FIRST:-8}
 PG_CPUSET=${PG_CPUSET:-16-23}
 PG_CPUS=${PG_CPUS:-8}
 PG_MAX_CONNECTIONS=${PG_MAX_CONNECTIONS:-400}
-EPOLL=${EPOLL:-4.2.19.Final}
+EPOLL=${EPOLL:-${NETTY:-4.2.19.Final}}
 GRADLE=${GRADLE:-./gradlew}
 export JAVA_OPTS=${JAVA_OPTS:-"-Xms1g -Xmx1g"}
 OUT=${OUT:-"$(mktemp -d /tmp/orm-vs-reactive.XXXXXX)/results.txt"}
@@ -119,7 +120,7 @@ fi
 if [ "$SKIP_BUILD" == "true" ] && [ -x "$BIN" ]; then
 	echo "Skipping build, using $BIN"
 else
-	$GRADLE :hibernate-orm-benchmark-orm-vs-reactive:installDist -Pstack=vertx5 ${EPOLL:+-Pepoll=$EPOLL}
+	$GRADLE :hibernate-orm-benchmark-orm-vs-reactive:installDist -Pstack=vertx5 ${EPOLL:+-Pepoll=$EPOLL} ${NETTY:+-PnettyVersion=$NETTY}
 fi
 
 # --- Benchmark ---
