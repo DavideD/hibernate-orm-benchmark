@@ -90,7 +90,12 @@ cores and PostgreSQL on other cores.
 > clearly wins on throughput when ORM has far fewer threads than connections (4 threads and 32 connections: 0.4k against
 > 5.2k sessions/s at 5 ms delay).
 
-- **Reactive is sensitive to its configuration:** NIO instead of epoll costs 10–40% more CPU, no statement cache about
+- **With Netty 4.2.20.Final** (the fix below), Reactive on NIO is about as cheap as on epoll: under load it uses 6–23%
+  less CPU per session than ORM (41–48 µs against 50–53 µs), with the same p50 and p99 on epoll. It still doesn't raise
+  the maximum rate (2 cores, pool 8: ORM 32.0k, the best Reactive 28.0–31.2k; 4 cores, pool 32: equal within the
+  noise), and with a DB delay or a low rate ORM stays the cheapest. Section 12 of
+  [`ORM_VS_REACTIVE.md`](ORM_VS_REACTIVE.md) has the tables.
+- **Reactive is sensitive to its configuration:** with Netty 4.2.19, NIO instead of epoll costs 10–40% more CPU, no statement cache about
   70% more, `perEventLoop` with 32 connections drops to 38–45k, and twice as many event loops as cores hurts `shared`
   by 4–24%.
 - **Virtual threads were disappointing:** 55–85% of the platform-thread rate at high load, and the most expensive
@@ -107,11 +112,14 @@ cores and PostgreSQL on other cores.
 <summary>Commits and how to run</summary>
 
 - 91fce95 Compare Hibernate ORM with Hibernate Reactive
+- 266b506 Add a NETTY option to run_OrmVsReactive.sh
 
 ```
 ./run_OrmVsReactive.sh --help
 # On JDK 25 the Gradle 8.4 wrapper doesn't run: use a newer Gradle
 GRADLE=gradle JAVA_HOME=/usr/lib/jvm/java-25-openjdk ./run_OrmVsReactive.sh ...
+# Replace the Netty of Vert.x
+NETTY=4.2.20.Final ./run_OrmVsReactive.sh ...
 ```
 
 </details>

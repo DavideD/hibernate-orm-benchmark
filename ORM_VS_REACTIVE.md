@@ -8,6 +8,10 @@ The answer is in section 9. In one sentence: with a thread pool and a connection
 sustain the same rate within about 10%, Reactive on epoll uses 12–23% less CPU per request when the CPUs are busy,
 and Reactive wins by a wide margin only when the threads you can afford are far fewer than the connections.
 
+Sections 4 to 8 ran Reactive with Netty 4.2.19, whose NIO event loop busy-polls (`NETTY_SELECT_ROUNDING.md`).
+Section 12 runs it again with the fix of Netty 4.2.20.Final: Reactive on NIO is then about as cheap as on epoll,
+and the conclusions don't change otherwise.
+
 ## 1. What was compared
 
 The same workload on both stacks, against the same PostgreSQL 18:
@@ -457,6 +461,9 @@ rejects a request, so a system that can't keep up piles up virtual threads (and 
 
 ## 9. Conclusions
 
+(With Netty 4.2.19. With Netty 4.2.20.Final, section 12, the CPU saving of Reactive is on NIO too, 6–23% less than the ORM,
+and the rest holds.)
+
 Hibernate Reactive was **faster than Hibernate ORM** in these cases:
 
 1. **CPU per session when the CPUs are busy and the database is fast:** 12–23% less than platform threads on the epoll transport,
@@ -515,7 +522,133 @@ MODE=fixed RATE=10000 CPUS=2 POOL_SIZES=32 REPEAT=3 ./run_OrmVsReactive.sh      
 CONFIGS="orm:platform:4 orm:platform:8 orm:platform" LATENCIES=5 POOL_SIZES=32 ./run_OrmVsReactive.sh   # section 6
 ./run_OrmVsReactive.sh sloMs=50         # section 7
 CONFIGS="reactive:shared:epoll reactive:shared:epoll:pipe1" ./run_OrmVsReactive.sh      # section 8
+NETTY=4.2.20.Final MODE=fixed RATE=9000 CPUS=2 POOL_SIZES=8 REPEAT=3 \
+  CONFIGS="orm:platform reactive:shared reactive:shared:epoll reactive:localWait reactive:localWait:epoll reactive:perEventLoop reactive:perEventLoop:epoll" \
+  ./run_OrmVsReactive.sh                # section 12, one of the regimes
 ```
 
 Gradle 8.4 of the wrapper can't run on JDK 25: the runs used `GRADLE=gradle` (9.4.1) with `JAVA_HOME=/usr/lib/jvm/java-25-openjdk`.
 The raw data isn't in git.
+
+## 12. With Netty 4.2.20.Final
+
+The Reactive numbers of sections 4 to 8 were measured with Vert.x 5.1.10 and the Netty it brings, 4.2.19, which has the
+busy poll of the NIO event loop of `NETTY_SELECT_ROUNDING.md`: the NIO configurations paid for it, epoll didn't.
+Netty 4.2.20.Final has the fix. This section runs the comparison again with all the Netty modules replaced by 4.2.20.Final
+(`NETTY=4.2.20.Final`, see section 11), on 2026-11-04, on the same machine, with the ORM measured again in the same rounds.
+
+#### The same rate for everyone
+
+Like section 5, 3 rounds without a delay and 2 with one:
+
+**2 cores, pool 8, DB latency 0 ms, 9000 sessions/s**
+
+| Configuration | Runs | Process CPU/session (µs) | JVM CPUs busy/session (µs) | Busy cores | p50 (ms) | p99 (ms) | p99.9 (ms) |
+|---|---|---|---|---|---|---|---|
+| ORM, platform threads | 3 | 50 | 70–75 | 0.63–0.68 | 0.82–0.85 | 1.3–2.6 | 3.2–6.8 |
+| Reactive `shared`, NIO | 3 | 50–54 | 70–90 | 0.63–0.81 | 1.10–1.20 | 2.1–5.6 | 4.7–14.9 |
+| Reactive `shared`, epoll | 3 | 46–47 | 65–68 | 0.58–0.61 | 0.80–0.81 | 1.4–2.5 | 6.2–6.4 |
+| Reactive `localWait`, NIO | 3 | 44–45 | 66–84 | 0.59–0.75 | 1.03–1.07 | 1.9–2.4 | 4.5–5.8 |
+| Reactive `localWait`, epoll | 3 | 43–44 | 63–97 | 0.57–0.87 | 0.80–0.82 | 1.3–1.7 | 3.2–9.4 |
+| Reactive `perEventLoop`, NIO | 3 | 44 | 65–66 | 0.59 | 1.03 | 1.9 | 5.0–6.8 |
+| Reactive `perEventLoop`, epoll | 3 | 43–44 | 65–88 | 0.58–0.79 | 0.80–0.83 | 1.3–3.0 | 4.6–10.7 |
+
+**2 cores, pool 32, DB latency 0 ms, 10000 sessions/s**
+
+| Configuration | Runs | Process CPU/session (µs) | JVM CPUs busy/session (µs) | Busy cores | p50 (ms) | p99 (ms) | p99.9 (ms) |
+|---|---|---|---|---|---|---|---|
+| ORM, platform threads | 3 | 53 | 72–75 | 0.72–0.74 | 0.88–0.89 | 1.5–2.0 | 3.7–9.3 |
+| Reactive `shared`, NIO | 3 | 44 | 65–68 | 0.65–0.68 | 1.14–1.15 | 2.3–2.4 | 4.4–5.1 |
+| Reactive `shared`, epoll | 3 | 41–44 | 62–74 | 0.62–0.75 | 0.85–0.89 | 1.5–3.4 | 5.4–9.7 |
+| Reactive `localWait`, NIO | 3 | 43–44 | 65–67 | 0.65–0.67 | 1.14–1.15 | 2.3–2.5 | 5.1–6.2 |
+| Reactive `localWait`, epoll | 3 | 42 | 62–82 | 0.62–0.82 | 0.85–0.87 | 1.5–2.7 | 4.7–7.2 |
+| Reactive `perEventLoop`, NIO | 3 | 42–44 | 65–90 | 0.65–0.90 | 1.13–1.21 | 2.2–4.6 | 3.8–19.7 |
+| Reactive `perEventLoop`, epoll | 3 | 41–42 | 63–64 | 0.63–0.64 | 0.86 | 1.6 | 7.0–13.3 |
+
+**4 cores, pool 32, DB latency 0 ms, 19000 sessions/s**
+
+| Configuration | Runs | Process CPU/session (µs) | JVM CPUs busy/session (µs) | Busy cores | p50 (ms) | p99 (ms) | p99.9 (ms) |
+|---|---|---|---|---|---|---|---|
+| ORM, platform threads | 3 | 52 | 74 | 1.40–1.41 | 0.86 | 1.3–1.8 | 3.1–3.6 |
+| Reactive `shared`, NIO | 3 | 47–48 | 70–77 | 1.33–1.46 | 1.16–1.18 | 2.1–2.4 | 3.6–4.5 |
+| Reactive `shared`, epoll | 3 | 42–47 | 64–104 | 1.22–1.97 | 0.84–0.91 | 1.4–6.8 | 3.4–16.4 |
+| Reactive `localWait`, NIO | 3 | 43–44 | 66–71 | 1.25–1.35 | 1.08–1.10 | 2.1–2.5 | 3.3–10.4 |
+| Reactive `localWait`, epoll | 3 | 41–42 | 62–63 | 1.18–1.21 | 0.84–0.85 | 1.4 | 3.0–3.4 |
+| Reactive `perEventLoop`, NIO | 3 | 43–44 | 66 | 1.25–1.26 | 1.09–1.10 | 2.1 | 4.1–5.0 |
+| Reactive `perEventLoop`, epoll | 3 | 41–42 | 62–65 | 1.18–1.24 | 0.84–0.85 | 1.4 | 3.5–3.7 |
+
+**2 cores, pool 8, DB latency 1 ms, 1500 sessions/s**
+
+| Configuration | Runs | Process CPU/session (µs) | JVM CPUs busy/session (µs) | Busy cores | p50 (ms) | p99 (ms) | p99.9 (ms) |
+|---|---|---|---|---|---|---|---|
+| ORM, platform threads | 2 | 68 | 91–93 | 0.14 | 2.79 | 3.4 | 4.5–4.8 |
+| Reactive `shared`, NIO | 2 | 83–84 | 107–112 | 0.16–0.17 | 2.85–2.86 | 4.1–4.2 | 9.9–13.5 |
+| Reactive `shared`, epoll | 2 | 78–79 | 108–110 | 0.16–0.17 | 2.79–2.80 | 3.4–3.5 | 7.9–9.2 |
+| Reactive `localWait`, NIO | 2 | 77–78 | 110–117 | 0.16–0.18 | 2.87–2.88 | 4.2–4.3 | 8.7–14.0 |
+| Reactive `localWait`, epoll | 2 | 77 | 107–111 | 0.16–0.17 | 2.82–2.83 | 4.0–4.1 | 6.8–9.0 |
+| Reactive `perEventLoop`, NIO | 2 | 73–76 | 109–114 | 0.16–0.17 | 2.87 | 4.4–4.6 | 7.9–11.5 |
+| Reactive `perEventLoop`, epoll | 2 | 75–76 | 105–108 | 0.16 | 2.83–2.84 | 4.3 | 9.2–10.9 |
+
+**4 cores, pool 32, DB latency 5 ms, 2200 sessions/s**
+
+| Configuration | Runs | Process CPU/session (µs) | JVM CPUs busy/session (µs) | Busy cores | p50 (ms) | p99 (ms) | p99.9 (ms) |
+|---|---|---|---|---|---|---|---|
+| ORM, platform threads | 2 | 65–66 | 85–89 | 0.19 | 5.76 | 6.3 | 7.5–8.8 |
+| Reactive `shared`, NIO | 2 | 78 | 128–141 | 0.28–0.31 | 5.87 | 7.1 | 9.3–11.3 |
+| Reactive `shared`, epoll | 2 | 76–78 | 113–135 | 0.25–0.30 | 5.79 | 6.3 | 8.7–10.0 |
+| Reactive `localWait`, NIO | 2 | 77–78 | 117–136 | 0.26–0.30 | 5.87 | 7.1 | 8.7–9.8 |
+| Reactive `localWait`, epoll | 2 | 75 | 117–122 | 0.26–0.27 | 5.78–5.79 | 6.3–6.4 | 9.1–10.0 |
+| Reactive `perEventLoop`, NIO | 2 | 78–80 | 116–158 | 0.25–0.35 | 5.87 | 7.2 | 9.4–9.8 |
+| Reactive `perEventLoop`, epoll | 2 | 76–82 | 149–197 | 0.33–0.43 | 5.79–5.80 | 6.4–6.6 | 9.4–12.5 |
+
+#### Maximum sustainable rate
+
+Like section 4, no delay, 2 rounds. Rate in thousands of sessions/s:
+
+| Configuration | 2 cores, pool 8 | busy cores | 4 cores, pool 32 | busy cores |
+|---|---|---|---|---|
+| ORM, platform threads | 32.0 | 1.91–1.94 | 46.9–61.3 | 3.15–3.93 |
+| Reactive `shared`, NIO | 26.4–27.2 | 1.61 | 57.7–59.5 | 3.58–3.70 |
+| Reactive `shared`, epoll | 28.8–30.4 | 1.61–1.68 | 51.7–61.3 | 3.16–3.63 |
+| Reactive `localWait`, NIO | 29.6–30.4 | 1.68 | 56.5–57.7 | 3.40–3.45 |
+| Reactive `localWait`, epoll | 28.0–31.2 | 1.54–1.69 | 59.5 | 3.38–3.42 |
+| Reactive `perEventLoop`, NIO | 19.2–21.4 | 1.12–1.26 | 39.6 | 2.35–2.42 |
+
+The ORM's 46.9k with 4 cores is a search that hit a 45 ms p99 early (a stall); the other round, and section 4, give 60.8–61.3k.
+
+#### How late the sessions start
+
+The load generator of Reactive starts the sessions from a Vert.x timer (`LoadVerticle`, at least 1 ms, then all the sessions
+that are due), and the latency counts from the scheduled start. The NIO event loop rounds its timeouts up to the next millisecond
+again with the fix (`NETTY_SELECT_ROUNDING.md`, "The latency side effect"), the epoll one doesn't. To separate the two,
+a probe (not committed) recorded how late each session started against its schedule, `shared`, 2 cores, pool 8, 9000 sessions/s,
+2 runs each:
+
+| Transport | Start lateness p50 / p90 / p99 | Session p50 / p99 | Process CPU/session |
+|---|---|---|---|
+| NIO | 757 / 1376–1378 / 1672–1677 µs | 1.09–1.10 / 2.0–2.1 ms | 50–51 µs |
+| epoll | 541–542 / 972–975 / 1073–1075 µs | 0.79 / 1.3–1.4 ms | 45–46 µs |
+
+So about 215 µs of the 300 µs that NIO adds to the median are the load generator's timers, and about 80 µs are the sessions
+themselves. A server that receives its requests from the network doesn't have the first part, but any Vert.x timer of the
+application does. Every configuration, the ORM too, starts its sessions about 0.5 ms after their schedule on average,
+because of the 1 ms granularity of the generators.
+
+#### What changed
+
+- **Reactive on NIO is now about as cheap as on epoll** without a delay: 42–48 µs of process CPU per session against 46–63 µs before
+  (section 5), within 1–5 µs of epoll. `shared` with 2 connections per event loop (2 cores, pool 8) is the exception, at 50–54 µs.
+- **Reactive uses 6–23% less process CPU than the ORM when the CPUs are busy and the database is fast:** 41–48 µs against 50–53,
+  except `shared` on NIO with 2 connections per event loop (the same as the ORM). The busy CPU of the JVM CPUs, which includes
+  the network stack of the kernel, is closer: mostly 62–71 µs against 70–75.
+- **Without a latency cost on epoll, with a small one on NIO.** On epoll the p50 and p99 are the ORM's (0.80–0.91 ms, 1.3–1.7 ms
+  in most runs). On NIO the p50 is 0.2–0.3 ms higher, mostly the load generator (above), and the p99 is 2.1–2.5 ms against 1.3–2.0.
+- **No higher peak rate.** At the p99 limit of 10 ms the ORM sustains 32.0k with 2 cores and 8 connections, the best Reactive
+  configurations 28.0–31.2k, and they stop at 1.54–1.69 busy cores of 2 against 1.91–1.94 for the ORM. With 4 cores and 32 connections
+  they are the same within the noise. The CPU that Reactive saves doesn't turn into rate under a tight latency limit (section 7
+  shows what a looser one gives).
+- **With a delay and a low load the ORM stays the cheapest:** 68 µs against 73–84 at 1 ms and 1500/s, 65–66 µs against 75–82
+  at 5 ms and 2200/s. NIO is now close to epoll there too (77–80 µs at 5 ms, against 99–103 before).
+- **The pool still matters:** `perEventLoop` on NIO is at 19.2–21.4k with 8 connections and 2 cores, and 39.6k with 32 connections
+  and 4 cores.
+
